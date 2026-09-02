@@ -49,8 +49,12 @@ class DocumentDetector {
 
   /// Detecta sobre una imagen a resolucion completa (reduce internamente y
   /// reescala el resultado a las coordenadas originales).
-  static Quad? detect(GrayImage full) {
-    final scale = workSize / math.max(full.width, full.height);
+  ///
+  /// [targetSize] permite bajar la resolucion de trabajo en dispositivos
+  /// modestos; por debajo de ~240 px la deteccion pierde fiabilidad.
+  static Quad? detect(GrayImage full, {int targetSize = workSize}) {
+    final effective = targetSize.clamp(240, 768);
+    final scale = effective / math.max(full.width, full.height);
     final GrayImage small;
     if (scale < 1) {
       small = downscaleGray(full, math.max(2, (full.width * scale).round()),

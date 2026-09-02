@@ -39,8 +39,8 @@ class Folder {
         id: m['id'] as String,
         name: m['name'] as String,
         parentId: m['parent_id'] as String?,
-        createdAt: DateTime.fromMillisecondsSinceEpoch(m['created_at'] as int),
-        color: (m['color'] as int?) ?? 0,
+        createdAt: _parseDate(m['created_at']),
+        color: _parseInt(m['color']),
       );
 }
 
@@ -135,19 +135,16 @@ class ScanPage {
   factory ScanPage.fromMap(Map<String, Object?> m) => ScanPage(
         id: m['id'] as String,
         documentId: m['document_id'] as String,
-        position: m['position'] as int,
+        position: _parseInt(m['position']),
         originalFile: m['original_file'] as String,
         processedFile: m['processed_file'] as String,
         thumbFile: m['thumb_file'] as String,
-        quad: m['quad'] == null ? null : Quad.fromJson(_decode(m['quad'] as String)),
+        quad: _parseQuad(m['quad']),
         filter: ScanFilter.fromName(m['filter'] as String?),
-        adjustments: m['adjustments'] == null
-            ? Adjustments.none
-            : Adjustments.fromJson(
-                Map<String, dynamic>.from(_decode(m['adjustments'] as String) as Map)),
-        rotation: (m['rotation'] as int?) ?? 0,
-        width: (m['width'] as int?) ?? 0,
-        height: (m['height'] as int?) ?? 0,
+        adjustments: _parseAdjustments(m['adjustments']),
+        rotation: _parseInt(m['rotation']),
+        width: _parseInt(m['width']),
+        height: _parseInt(m['height']),
         ocrText: m['ocr_text'] as String?,
         ocrBoxes: m['ocr_boxes'] as String?,
       );
@@ -223,17 +220,15 @@ class ScanDocument {
         id: m['id'] as String,
         title: m['title'] as String,
         folderId: m['folder_id'] as String?,
-        createdAt: DateTime.fromMillisecondsSinceEpoch(m['created_at'] as int),
-        updatedAt: DateTime.fromMillisecondsSinceEpoch(m['updated_at'] as int),
+        createdAt: _parseDate(m['created_at']),
+        updatedAt: _parseDate(m['updated_at']),
         tags: ((m['tags'] as String?) ?? '')
             .split(',')
             .where((e) => e.trim().isNotEmpty)
             .toList(),
-        favorite: ((m['favorite'] as int?) ?? 0) == 1,
-        deletedAt: m['deleted_at'] == null
-            ? null
-            : DateTime.fromMillisecondsSinceEpoch(m['deleted_at'] as int),
-        pageCount: (m['page_count'] as int?) ?? 0,
+        favorite: _parseInt(m['favorite']) == 1,
+        deletedAt: m['deleted_at'] == null ? null : _parseDate(m['deleted_at']),
+        pageCount: _parseInt(m['page_count']),
         coverThumb: m['cover_thumb'] as String?,
       );
 }
@@ -249,4 +244,34 @@ class DocumentWithPages {
 }
 
 String _encode(Object? v) => jsonEncode(v);
-Object? _decode(String s) => jsonDecode(s);
+
+/// Lecturas defensivas de los campos JSON guardados en la base de datos.
+///
+/// Un valor corrupto (por un cierre a medias, por ejemplo) devuelve el valor
+/// por defecto en lugar de impedir que se abra el documento entero.
+Quad? _parseQuad(Object? raw) {
+  if (raw is! String || raw.isEmpty) return null;
+  try {
+    return Quad.fromJson(jsonDecode(raw));
+  } catch (_) {
+    return null;
+  }
+}
+
+Adjustments _parseAdjustments(Object? raw) {
+  if (raw is! String || raw.isEmpty) return Adjustments.none;
+  try {
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map) return Adjustments.none;
+    return Adjustments.fromJson(Map<String, dynamic>.from(decoded));
+  } catch (_) {
+    return Adjustments.none;
+  }
+}
+
+int _parseInt(Object? raw, [int fallback = 0]) =>
+    raw is int ? raw : (raw is num ? raw.toInt() : fallback);
+
+DateTime _parseDate(Object? raw) => DateTime.fromMillisecondsSinceEpoch(
+      raw is int ? raw : (raw is num ? raw.toInt() : 0),
+    );

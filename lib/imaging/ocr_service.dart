@@ -1,6 +1,10 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+
+import '../core/failure.dart';
+import '../core/logger.dart';
 
 /// Una linea reconocida con su caja, en pixeles de la imagen de origen.
 class OcrLine {
@@ -32,11 +36,20 @@ class OcrResult {
   static List<OcrLine> parseBoxes(String? json) {
     if (json == null || json.isEmpty) return const [];
     try {
-      final list = jsonDecode(json) as List;
-      return list
-          .map((e) => OcrLine.fromJson(Map<String, dynamic>.from(e as Map)))
-          .toList();
-    } catch (_) {
+      final decoded = jsonDecode(json);
+      if (decoded is! List) return const [];
+      final out = <OcrLine>[];
+      for (final e in decoded) {
+        if (e is! Map) continue;
+        try {
+          out.add(OcrLine.fromJson(Map<String, dynamic>.from(e)));
+        } catch (_) {
+          // Una caja corrupta no invalida el resto de la pagina.
+        }
+      }
+      return out;
+    } catch (e) {
+      Log.w('OCR', 'Cajas de texto ilegibles; se ignoran', e);
       return const [];
     }
   }
@@ -47,39 +60,79 @@ class OcrService {
   OcrService._();
   static final OcrService instance = OcrService._();
 
-  final Map<TextRecognitionScript, TextRecognizer> _recognizers = {};
+  /// Solo se empaqueta el modelo latino, que es el que cubre el espanol y el
+  /// resto de lenguas con alfabeto latino. Anadir chino, japones, coreano o
+  /// devanagari exige incluir sus dependencias nativas (y ~40 MB mas de APK).
+  TextRecognizer? _recognizer;
 
-  TextRecognizer _recognizer(TextRecognitionScript script) =>
-      _recognizers.putIfAbsent(script, () => TextRecognizer(script: script));
+  TextRecognizer get _latin =>
+      _recognizer ??= TextRecognizer(script: TextRecognitionScript.latin);
 
   /// Reconoce el texto de una imagen en disco.
+  ///
+  /// Lanza [AppFailure] con un motivo comprensible: el OCR depende de los
+  /// servicios de Google Play, que pueden faltar o estar desactualizados.
   Future<OcrResult> recognizeFile(
     String path, {
-    TextRecognitionScript script = TextRecognitionScript.latin,
+    Duration timeout = const Duration(seconds: 45),
   }) async {
-    final input = InputImage.fromFilePath(path);
-    final recognized = await _recognizer(script).processImage(input);
-
-    final lines = <OcrLine>[];
-    for (final block in recognized.blocks) {
-      for (final line in block.lines) {
-        final r = line.boundingBox;
-        lines.add(OcrLine(
-          line.text,
-          r.left.toDouble(),
-          r.top.toDouble(),
-          r.width.toDouble(),
-          r.height.toDouble(),
-        ));
-      }
+    if (path.isEmpty) {
+      throw const AppFailure.validation('No hay imagen que analizar.');
     }
-    return OcrResult(recognized.text, lines);
+    final file = File(path);
+    if (!await file.exists()) {
+      throw const AppFailure.notFound('La imagen de la pagina ya no esta.');
+    }
+
+    try {
+      final input = InputImage.fromFilePath(path);
+      final recognized = await _latin.processImage(input).timeout(timeout);
+
+      final lines = <OcrLine>[];
+      for (final block in recognized.blocks) {
+        for (final line in block.lines) {
+          final r = line.boundingBox;
+          if (r.width <= 0 || r.height <= 0) continue;
+          if (line.text.trim().isEmpty) continue;
+          lines.add(OcrLine(
+            line.text,
+            r.left.toDouble(),
+            r.top.toDouble(),
+            r.width.toDouble(),
+            r.height.toDouble(),
+          ));
+        }
+      }
+      return OcrResult(recognized.text, lines);
+    } on AppFailure {
+      rethrow;
+    } catch (e, st) {
+      final text = e.toString().toLowerCase();
+      if (text.contains('google play') || text.contains('unavailable')) {
+        throw AppFailure(
+          kind: FailureKind.ocr,
+          message: 'El reconocimiento de texto necesita los Servicios de Google '
+              'Play actualizados en este dispositivo.',
+          cause: e,
+          stackTrace: st,
+          retryable: false,
+        );
+      }
+      throw AppFailure(
+        kind: FailureKind.ocr,
+        message: 'No se ha podido reconocer el texto de esta pagina.',
+        cause: e,
+        stackTrace: st,
+      );
+    }
   }
 
   Future<void> dispose() async {
-    for (final r in _recognizers.values) {
-      await r.close();
+    try {
+      await _recognizer?.close();
+    } catch (e) {
+      Log.w('OCR', 'Error cerrando el reconocedor', e);
     }
-    _recognizers.clear();
+    _recognizer = null;
   }
 }

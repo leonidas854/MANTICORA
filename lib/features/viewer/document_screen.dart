@@ -5,12 +5,16 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:printing/printing.dart';
 import 'package:share_plus/share_plus.dart';
 
+import '../../core/device_profile.dart';
+import '../../core/error_orchestrator.dart';
 import '../../core/providers.dart';
 import '../../core/settings.dart';
 import '../../data/models/models.dart';
 import '../../export/docx_builder.dart';
 import '../../export/export_service.dart';
+import '../../export/file_saver.dart';
 import '../../export/pdf_builder.dart';
+import '../../export/pdf_tools.dart';
 import '../../imaging/ocr_service.dart';
 import '../../widgets/common.dart';
 import '../home/scan_flow.dart';
@@ -71,9 +75,13 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
             IconButton(
               tooltip: doc.document.favorite ? 'Quitar de favoritos' : 'Favorito',
               icon: Icon(doc.document.favorite ? Icons.star : Icons.star_border),
-              onPressed: () => ref
-                  .read(repositoryProvider)
-                  .setFavorite(doc.document.id, !doc.document.favorite),
+              onPressed: () => ErrorOrchestrator.guard(
+                'Cambiando el favorito',
+                () => ref
+                    .read(repositoryProvider)
+                    .setFavorite(doc.document.id, !doc.document.favorite),
+                tag: 'Documento',
+              ),
             ),
             PopupMenuButton<String>(
               onSelected: (v) => _onMenu(v, doc),
@@ -172,7 +180,13 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
                 if (f == null || !f.existsSync()) {
                   return const ColoredBox(color: Color(0x11000000));
                 }
-                return Image.file(f, fit: BoxFit.cover, cacheWidth: 340);
+                return Image.file(
+                  f,
+                  fit: BoxFit.cover,
+                  cacheWidth: DeviceProfile.current.thumbnailCacheWidth,
+                  errorBuilder: (_, _, _) =>
+                      const ColoredBox(color: Color(0x11000000)),
+                );
               },
             ),
             Positioned(
@@ -276,9 +290,12 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
   Future<void> _rename(DocumentWithPages doc) async {
     final name = await promptText(context,
         title: 'Renombrar', initial: doc.document.title, label: 'Titulo');
-    if (name != null) {
-      await ref.read(repositoryProvider).renameDocument(doc.document.id, name);
-    }
+    if (name == null) return;
+    await ErrorOrchestrator.guard(
+      'Renombrando el documento',
+      () => ref.read(repositoryProvider).renameDocument(doc.document.id, name),
+      tag: 'Documento',
+    );
   }
 
   Future<void> _onMenu(String value, DocumentWithPages doc) async {
@@ -301,8 +318,15 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
             message: 'Podras recuperarlo mas tarde.',
             confirmLabel: 'Mover',
             destructive: true)) {
-          await ref.read(repositoryProvider).moveToTrash(doc.document.id);
-          if (mounted) Navigator.pop(context);
+          final ok = await ErrorOrchestrator.guard<bool>(
+            'Moviendo a la papelera',
+            () async {
+              await ref.read(repositoryProvider).moveToTrash(doc.document.id);
+              return true;
+            },
+            tag: 'Documento',
+          );
+          if (ok == true && mounted) Navigator.pop(context);
         }
     }
   }
@@ -316,10 +340,26 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
       return;
     }
     final repo = ref.read(repositoryProvider);
-    for (final page in doc.pages.where((p) => _selected.contains(p.id))) {
-      await repo.deletePage(page);
+    final targets = doc.pages.where((p) => _selected.contains(p.id)).toList();
+    var removed = 0;
+    for (final page in targets) {
+      final ok = await ErrorOrchestrator.guard<bool>(
+        'Eliminando una pagina',
+        () async {
+          await repo.deletePage(page);
+          return true;
+        },
+        tag: 'Documento',
+        notifyUser: false,
+      );
+      if (ok == true) removed++;
     }
+    if (!mounted) return;
     setState(_selected.clear);
+    if (removed < targets.length) {
+      showMessage(context,
+          'Se eliminaron $removed de ${targets.length} paginas.', error: true);
+    }
   }
 
   Future<void> _reorder(DocumentWithPages doc) async {
@@ -342,9 +382,8 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
                 child: ReorderableListView.builder(
                   scrollController: controller,
                   itemCount: pages.length,
-                  onReorder: (oldIndex, newIndex) {
+                  onReorderItem: (oldIndex, newIndex) {
                     setSheetState(() {
-                      if (newIndex > oldIndex) newIndex--;
                       pages.insert(newIndex, pages.removeAt(oldIndex));
                     });
                   },
@@ -373,10 +412,14 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
                   padding: const EdgeInsets.all(12),
                   child: FilledButton(
                     onPressed: () async {
-                      await ref.read(repositoryProvider).reorderPages(
-                            doc.document.id,
-                            pages.map((p) => p.id).toList(),
-                          );
+                      await ErrorOrchestrator.guard(
+                        'Guardando el orden de las paginas',
+                        () => ref.read(repositoryProvider).reorderPages(
+                              doc.document.id,
+                              pages.map((p) => p.id).toList(),
+                            ),
+                        tag: 'Documento',
+                      );
                       if (ctx.mounted) Navigator.pop(ctx);
                     },
                     child: const Text('Guardar orden'),
@@ -392,22 +435,42 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
 
   Future<void> _runOcr(DocumentWithPages doc) async {
     final repo = ref.read(repositoryProvider);
-    await runWithProgress<void>(context, 'Reconociendo texto...', (setMessage) async {
-      for (var i = 0; i < doc.pages.length; i++) {
-        setMessage('Pagina ${i + 1} de ${doc.pages.length}...');
-        final page = doc.pages[i];
-        final file = await repo.pageFile(page);
-        if (!await file.exists()) continue;
-        try {
-          final result = await OcrService.instance.recognizeFile(file.path);
-          await repo.setOcrText(page.id, doc.document.id, result.text,
-              boxesJson: result.boxesJson);
-        } catch (e) {
-          if (mounted) showMessage(context, 'OCR fallido en la pagina ${i + 1}');
+    final failed = await runWithProgress<List<int>>(
+      context,
+      'Reconociendo texto...',
+      (setMessage) async {
+        final errors = <int>[];
+        for (var i = 0; i < doc.pages.length; i++) {
+          setMessage('Pagina ${i + 1} de ${doc.pages.length}...');
+          final page = doc.pages[i];
+          final ok = await ErrorOrchestrator.guard<bool>(
+            'OCR de la pagina ${i + 1}',
+            () async {
+              final file = await repo.pageFile(page);
+              final result = await OcrService.instance.recognizeFile(file.path);
+              await repo.setOcrText(page.id, doc.document.id, result.text,
+                  boxesJson: result.boxesJson);
+              return true;
+            },
+            tag: 'OCR',
+            notifyUser: false,
+          );
+          if (ok != true) errors.add(i + 1);
+          // Un respiro entre paginas: el OCR es lo mas pesado que hace la app.
+          await Future<void>.delayed(const Duration(milliseconds: 10));
         }
-      }
-    });
-    if (mounted) showMessage(context, 'Texto reconocido');
+        return errors;
+      },
+      tag: 'OCR',
+    );
+    if (failed == null || !mounted) return;
+    showMessage(
+      context,
+      failed.isEmpty
+          ? 'Texto reconocido en las ${doc.pages.length} paginas'
+          : 'Texto reconocido. Fallaron las paginas: ${failed.join(', ')}',
+      error: failed.isNotEmpty,
+    );
   }
 
   Future<void> _showText(DocumentWithPages doc) async {
@@ -464,41 +527,45 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
     );
     if (options == null || !mounted) return;
 
-    final result = await runWithProgress<File?>(context, 'Creando PDF...',
-        (setMessage) async {
-      var export = await ExportService.instance.toPdf(
-        doc,
-        pageSize: options.size,
-        quality: options.quality,
-        searchableText: options.searchable,
-        watermark: options.watermark,
-        onProgress: (done, total) => setMessage('Pagina $done de $total...'),
-      );
-      if (options.password != null && options.password!.isNotEmpty) {
-        setMessage('Aplicando contrasena...');
-        final protectedBytes = await _protect(
-            await export.file.readAsBytes(), options.password!);
-        await export.file.writeAsBytes(protectedBytes, flush: true);
-      }
-      return export.file;
-    });
+    final result = await runWithProgress<ExportResult>(
+      context,
+      'Creando PDF...',
+      (setMessage) async {
+        final export = await ExportService.instance.toPdf(
+          doc,
+          pageSize: options.size,
+          quality: options.quality,
+          searchableText: options.searchable,
+          watermark: options.watermark,
+          onProgress: (done, total) => setMessage('Pagina $done de $total...'),
+        );
+        if (options.password != null && options.password!.isNotEmpty) {
+          setMessage('Aplicando contrasena...');
+          final protectedBytes = await PdfTools.protect(
+            await export.file.readAsBytes(),
+            userPassword: options.password!,
+          );
+          await export.file.writeAsBytes(protectedBytes, flush: true);
+        }
+        return export;
+      },
+      tag: 'Exportacion',
+    );
 
-    if (result != null && mounted) {
-      await _offerShare(result, 'PDF creado');
-    }
+    if (result == null || !mounted) return;
+    _warnIfPartial(result);
+    await _offerShare(result.file, 'PDF creado');
   }
 
-  Future<List<int>> _protect(List<int> bytes, String password) async {
-    // Import diferido para no cargar Syncfusion si no se usa.
-    final tools = await _pdfTools();
-    return tools(bytes, password);
-  }
-
-  Future<Future<List<int>> Function(List<int>, String)> _pdfTools() async {
-    return (bytes, password) async {
-      final result = await PdfProtectHelper.protect(bytes, password);
-      return result;
-    };
+  /// Avisa si alguna pagina se quedo fuera por tener la imagen dañada.
+  void _warnIfPartial(ExportResult result) {
+    if (!result.isPartial || !mounted) return;
+    showMessage(
+      context,
+      'Se omitieron las paginas ${result.skippedPages.join(', ')}: '
+      'no se pudieron leer sus imagenes.',
+      error: true,
+    );
   }
 
   Future<void> _exportDocx(DocumentWithPages doc) async {
@@ -540,13 +607,17 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
       }
     }
 
+    if (!mounted) return;
     final target = doc;
-    final result = await runWithProgress<File?>(context, 'Creando documento Word...',
-        (setMessage) async {
-      final export = await ExportService.instance.toDocx(target, mode: mode);
-      return export.file;
-    });
-    if (result != null && mounted) await _offerShare(result, 'Documento Word creado');
+    final result = await runWithProgress<ExportResult>(
+      context,
+      'Creando documento Word...',
+      (_) => ExportService.instance.toDocx(target, mode: mode),
+      tag: 'Exportacion',
+    );
+    if (result == null || !mounted) return;
+    _warnIfPartial(result);
+    await _offerShare(result.file, 'Documento Word creado');
   }
 
   Future<void> _exportImages(DocumentWithPages doc) async {
@@ -556,30 +627,40 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
       (_) => ExportService.instance.toImages(doc),
     );
     if (files == null || files.isEmpty || !mounted) return;
-    await SharePlus.instance.share(
-      ShareParams(
-        files: files.map((f) => XFile(f.path)).toList(),
-        subject: doc.document.title,
+    await ErrorOrchestrator.guard(
+      'Compartiendo las imagenes',
+      () => SharePlus.instance.share(
+        ShareParams(
+          files: files.map((f) => XFile(f.path)).toList(),
+          subject: doc.document.title,
+        ),
       ),
+      tag: 'Exportacion',
     );
   }
 
   Future<void> _sharePdf(DocumentWithPages doc) async {
     final settings = ref.read(settingsProvider);
-    final result = await runWithProgress<File?>(context, 'Preparando PDF...',
-        (setMessage) async {
-      final export = await ExportService.instance.toPdf(
+    final result = await runWithProgress<ExportResult>(
+      context,
+      'Preparando PDF...',
+      (setMessage) => ExportService.instance.toPdf(
         doc,
         pageSize: settings.pdfPageSize,
         quality: settings.pdfQuality,
         searchableText: settings.searchablePdf,
         onProgress: (done, total) => setMessage('Pagina $done de $total...'),
-      );
-      return export.file;
-    });
+      ),
+      tag: 'Exportacion',
+    );
     if (result == null || !mounted) return;
-    await SharePlus.instance.share(
-      ShareParams(files: [XFile(result.path)], subject: doc.document.title),
+    _warnIfPartial(result);
+    await ErrorOrchestrator.guard(
+      'Compartiendo el PDF',
+      () => SharePlus.instance.share(
+        ShareParams(files: [XFile(result.file.path)], subject: doc.document.title),
+      ),
+      tag: 'Exportacion',
     );
   }
 
@@ -592,7 +673,11 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
               quality: settings.pdfQuality,
             ));
     if (bytes == null || !mounted) return;
-    await Printing.layoutPdf(onLayout: (_) async => bytes);
+    await ErrorOrchestrator.guard(
+      'Enviando a la impresora',
+      () => Printing.layoutPdf(onLayout: (_) async => bytes),
+      tag: 'Exportacion',
+    );
   }
 
   Future<void> _offerShare(File file, String title) async {
@@ -611,7 +696,8 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
                       style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
                   const SizedBox(height: 4),
                   Text(
-                    '${file.path.split('/').last} · ${formatBytes(file.lengthSync())}',
+                    '${file.path.split('/').last} · '
+                    '${formatBytes(ErrorOrchestrator.guardSync('Midiendo el fichero', file.lengthSync, fallback: 0) ?? 0)}',
                     style: Theme.of(ctx).textTheme.bodySmall,
                   ),
                 ],
@@ -622,7 +708,12 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
               title: const Text('Compartir'),
               onTap: () {
                 Navigator.pop(ctx);
-                SharePlus.instance.share(ShareParams(files: [XFile(file.path)]));
+                ErrorOrchestrator.guard(
+                  'Compartiendo el fichero',
+                  () => SharePlus.instance
+                      .share(ShareParams(files: [XFile(file.path)])),
+                  tag: 'Exportacion',
+                );
               },
             ),
             ListTile(
@@ -641,16 +732,17 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
   }
 
   Future<void> _saveToDownloads(File file) async {
-    try {
-      final name = file.path.split('/').last;
-      final bytes = await file.readAsBytes();
-      final saved = await FileSaver.save(name, bytes);
-      if (mounted) {
-        showMessage(context, saved == null ? 'Guardado cancelado' : 'Guardado en $saved');
-      }
-    } catch (e) {
-      if (mounted) showMessage(context, 'No se pudo guardar: $e', error: true);
-    }
+    final saved = await ErrorOrchestrator.guard<String?>(
+      'Guardando en el dispositivo',
+      () async {
+        final name = file.path.split('/').last;
+        return FileSaver.save(name, await file.readAsBytes());
+      },
+      tag: 'Documento',
+    );
+    if (!mounted) return;
+    showMessage(context,
+        saved == null ? 'Guardado cancelado' : 'Guardado correctamente');
   }
 }
 

@@ -46,3 +46,49 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# ---------------------------------------------------------------------------
+#  Manticora
+# ---------------------------------------------------------------------------
+
+# 'build' es un enlace simbolico a ext4 (el proyecto vive en NTFS), no un
+# directorio: la regla con barra final no lo cubre.
+/build
+
+# Registros y descargas del instalador (setup.sh)
+.setup-logs/
+*.setup-logs/
+
+# APK y demas artefactos listos para distribuir: pesan decenas de MB y se
+# regeneran con './setup.sh build'.
+/dist/
+*.apk
+*.aab
+*.apks
+*.aar
+
+# Claves de firma. Nunca deben acabar en el repositorio.
+*.jks
+*.keystore
+key.properties
+android/key.properties
+
+# Configuracion local de la maquina (rutas del SDK)
+android/local.properties
+android/.gradle/
+.gradle/
+
+# Salidas de escritorio
+/linux/flutter/ephemeral/
+/windows/flutter/ephemeral/
+/macos/Flutter/ephemeral/
+
+# Base de datos y ficheros de prueba que se generan al ejecutar
+*.db
+*.db-shm
+*.db-wal
+*.db.corrupta
+
+# Cobertura de pruebas
+/coverage/
+lcov.info

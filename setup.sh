@@ -5,8 +5,12 @@
 #         ./setup.sh toolchain    -> solo instalar/configurar Flutter+Android
 #         ./setup.sh project      -> solo dependencias del proyecto
 #         ./setup.sh doctor       -> diagnostico
-#         ./setup.sh build        -> compilar APK release
-#         ./setup.sh run          -> ejecutar en dispositivo/emulador
+#         ./setup.sh clean        -> limpia y restaura el proyecto
+#         ./setup.sh test         -> ejecuta las pruebas
+#         ./setup.sh build        -> compilar los APK (quedan en dist/)
+#         ./setup.sh run          -> ejecutar en el movil o emulador Android
+#         ./setup.sh run linux    -> ejecutar en el escritorio (sin camara)
+#         ./setup.sh install      -> instalar el APK en el dispositivo
 #         ./setup.sh emulator     -> arrancar el emulador Android
 #  NO NECESITA ROOT. Todo se instala en $HOME.
 # ============================================================================
@@ -150,24 +154,30 @@ $endm
 ENVB
 }
 
+# El codigo vive en NTFS/FUSE: los artefactos de build van a ext4, que es mucho
+# mas rapido y evita los fallos de bloqueo/instantaneas de Gradle.
+link_build_dir() {
+  local fstype; fstype="$(findmnt -no FSTYPE --target "$PROJECT_DIR" 2>/dev/null)"
+  case "$fstype" in
+    fuseblk|ntfs|ntfs3|exfat|vfat) ;;
+    *) return 0 ;;
+  esac
+  local cache="$HOME/.cache/manticora/build"
+  mkdir -p "$cache"
+  if [ ! -L "$PROJECT_DIR/build" ]; then
+    rm -rf "$PROJECT_DIR/build"
+    ln -s "$cache" "$PROJECT_DIR/build"
+  fi
+  warn "Proyecto en $fstype: 'build/' redirigido a $cache (ext4)"
+}
+
 # ============================================================== PROYECTO
 phase_project() {
   step "Proyecto Flutter: dependencias"
   command -v flutter >/dev/null || export PATH="$FLUTTER_ROOT/bin:$PATH"
   cd "$PROJECT_DIR" || die "No puedo entrar a $PROJECT_DIR"
 
-  # El codigo vive en NTFS/FUSE: los artefactos de build van a ext4 (mucho mas rapido y sin
-  # problemas de bloqueo de ficheros de Gradle).
-  local fstype; fstype="$(findmnt -no FSTYPE --target "$PROJECT_DIR" 2>/dev/null)"
-  if [ "$fstype" = "fuseblk" ] || [ "$fstype" = "ntfs" ] || [ "$fstype" = "ntfs3" ]; then
-    local cache="$HOME/.cache/manticora/build"
-    mkdir -p "$cache"
-    if [ ! -L "$PROJECT_DIR/build" ]; then
-      rm -rf "$PROJECT_DIR/build"
-      ln -s "$cache" "$PROJECT_DIR/build"
-    fi
-    warn "Proyecto en $fstype: 'build/' redirigido a $cache (ext4) para acelerar compilaciones"
-  fi
+  link_build_dir
 
   if [ ! -d "$PROJECT_DIR/android" ]; then
     info "Generando andamiaje nativo (android/, linux/)..."
@@ -185,12 +195,124 @@ phase_project() {
 }
 
 phase_doctor() { step "flutter doctor"; flutter doctor -v; }
-phase_build()  { step "Compilando APK release"; cd "$PROJECT_DIR" && flutter build apk --release --split-per-abi \
-                   && ok "APK en: $PROJECT_DIR/build/app/outputs/flutter-apk/"; }
-phase_run()    { step "Ejecutando"; cd "$PROJECT_DIR" && flutter run; }
-phase_emu()    { step "Arrancando emulador"; "$ANDROID_SDK/emulator/emulator" -avd \
-                   "$(ls "$HOME/.android/avd" 2>/dev/null | grep -m1 '\.ini$' | sed 's/\.ini//')" \
-                   -gpu host -no-snapshot-load & disown; ok "Emulador lanzado en segundo plano"; }
+
+phase_clean() {
+  step "Limpiando"
+  cd "$PROJECT_DIR" || return 1
+  flutter clean >/dev/null 2>&1
+  rm -rf "$HOME/.cache/manticora/build"
+  link_build_dir
+  flutter pub get >/dev/null 2>&1 && ok "Proyecto limpio y dependencias restauradas"
+}
+
+# --------------------------------------------------------------- dispositivos
+
+first_avd() {
+  ls "$HOME/.android/avd" 2>/dev/null | grep -m1 '\.ini$' | sed 's/\.ini$//'
+}
+
+android_device() {
+  "$ANDROID_SDK/platform-tools/adb" devices 2>/dev/null \
+    | awk '$2 == "device" { print $1; exit }'
+}
+
+# Arranca el emulador y espera a que el sistema termine de iniciarse.
+boot_emulator() {
+  local avd; avd="$(first_avd)"
+  [ -n "$avd" ] || { err "No hay ningun emulador creado. Crealo desde Android Studio."; return 1; }
+
+  info "Arrancando el emulador '$avd'..."
+  nohup "$ANDROID_SDK/emulator/emulator" -avd "$avd" -gpu host -no-snapshot-save \
+        >"$LOG_DIR/emulator.log" 2>&1 &
+  disown 2>/dev/null
+
+  info "Esperando a que arranque (puede tardar un minuto)..."
+  local adb="$ANDROID_SDK/platform-tools/adb"
+  "$adb" wait-for-device >/dev/null 2>&1
+  local i=0
+  while [ "$i" -lt 90 ]; do
+    if [ "$("$adb" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then
+      ok "Emulador listo"
+      return 0
+    fi
+    sleep 2
+    i=$((i + 1))
+  done
+  err "El emulador no termino de arrancar (ver $LOG_DIR/emulator.log)"
+  return 1
+}
+
+phase_emu() {
+  step "Emulador Android"
+  if [ -n "$(android_device)" ]; then
+    ok "Ya hay un dispositivo conectado: $(android_device)"
+    return 0
+  fi
+  boot_emulator
+}
+
+phase_run() {
+  step "Ejecutando Manticora"
+  cd "$PROJECT_DIR" || return 1
+
+  # 'run linux' fuerza el escritorio; util para iterar rapido en la interfaz.
+  if [ "${2:-}" = "linux" ] || [ "${RUN_TARGET:-}" = "linux" ]; then
+    warn "Ejecutando en Linux: no hay camara ni OCR (son plugins de movil)"
+    info "Se puede importar desde la galeria para probar el resto del flujo"
+    flutter run -d linux
+    return $?
+  fi
+
+  local device; device="$(android_device)"
+  if [ -z "$device" ]; then
+    warn "No hay ningun movil ni emulador Android conectado"
+    if [ -n "$(first_avd)" ]; then
+      boot_emulator || return 1
+      device="$(android_device)"
+    else
+      err "Conecta un movil con depuracion USB activada, o crea un emulador"
+      info "Para probar solo la interfaz en el escritorio: ./setup.sh run linux"
+      return 1
+    fi
+  fi
+
+  ok "Dispositivo: $device"
+  flutter run -d "$device"
+}
+
+phase_build() {
+  step "Compilando APK de release"
+  cd "$PROJECT_DIR" || return 1
+
+  local dist="$PROJECT_DIR/dist"
+  mkdir -p "$dist"
+
+  info "APK por arquitectura (mas pequenos, para publicar)..."
+  flutter build apk --release --split-per-abi || return 1
+
+  info "APK universal (uno solo, instalable en cualquier movil)..."
+  flutter build apk --release || return 1
+
+  local out="$PROJECT_DIR/build/app/outputs/flutter-apk"
+  local stamp; stamp="$(date +%Y%m%d)"
+  cp -f "$out/app-release.apk"            "$dist/manticora-$stamp-universal.apk" 2>/dev/null
+  cp -f "$out/app-arm64-v8a-release.apk"  "$dist/manticora-$stamp-arm64.apk"     2>/dev/null
+  cp -f "$out/app-armeabi-v7a-release.apk" "$dist/manticora-$stamp-arm32.apk"    2>/dev/null
+
+  ok "APK listos en $dist"
+  ls -lh "$dist"/*.apk 2>/dev/null | awk '{printf "     %s  %s\n", $5, $9}'
+  printf "\n%s  Para instalarlo por cable: adb install -r dist/manticora-%s-universal.apk%s\n" \
+    "$C_B" "$stamp" "$C_0"
+}
+
+phase_install() {
+  step "Instalando en el dispositivo"
+  local device; device="$(android_device)"
+  [ -n "$device" ] || { err "No hay ningun dispositivo conectado"; return 1; }
+  local apk; apk="$(ls -t "$PROJECT_DIR"/dist/*universal*.apk 2>/dev/null | head -1)"
+  [ -n "$apk" ] || { err "No hay APK. Ejecuta primero: ./setup.sh build"; return 1; }
+  "$ANDROID_SDK/platform-tools/adb" -s "$device" install -r "$apk" && ok "Instalado: $(basename "$apk")"
+}
 
 banner() {
 cat <<'B'
@@ -206,11 +328,15 @@ case "${1:-all}" in
   toolchain) phase_toolchain ;;
   project)   phase_project ;;
   doctor)    phase_doctor ;;
+  clean)     phase_clean ;;
   build)     phase_build ;;
-  run)       phase_run ;;
+  run)       phase_run "$@" ;;
   emulator|emu) phase_emu ;;
+  install)   phase_install ;;
+  apk)       phase_build ;;
   all)       phase_toolchain; phase_project; phase_doctor ;;
-  *) die "Fase desconocida: $1 (usa: toolchain|project|doctor|build|run|emulator)" ;;
+  test)      step "Pruebas"; cd "$PROJECT_DIR" && flutter test ;;
+  *) die "Fase desconocida: $1 (usa: toolchain|project|doctor|clean|test|build|run|install|emulator)" ;;
 esac
 
 printf "\n%s  Listo. Abre una terminal NUEVA (o: source ~/.zshenv) para tener flutter en el PATH.%s\n" "$C_G" "$C_0"

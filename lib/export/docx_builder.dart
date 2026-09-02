@@ -58,7 +58,9 @@ class DocxBuilder {
         imageIndex++;
         final name = 'image$imageIndex.jpeg';
         final rid = 'rIdImg$imageIndex';
-        archive.addFile(ArchiveFile('word/media/$name', page.jpeg!.length, page.jpeg!));
+        archive.addFile(
+          ArchiveFile('word/media/$name', page.jpeg!.length, page.jpeg!),
+        );
         imageTypes.add('jpeg');
         imageRels.writeln(
           '<Relationship Id="$rid" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/$name"/>',
@@ -92,7 +94,11 @@ class DocxBuilder {
 
     _addString(archive, '[Content_Types].xml', _contentTypes(imageTypes));
     _addString(archive, '_rels/.rels', _rootRels());
-    _addString(archive, 'word/_rels/document.xml.rels', _documentRels(imageRels.toString()));
+    _addString(
+      archive,
+      'word/_rels/document.xml.rels',
+      _documentRels(imageRels.toString()),
+    );
     _addString(archive, 'word/document.xml', _document(body.toString()));
     _addString(archive, 'word/styles.xml', _styles());
     _addString(archive, 'docProps/core.xml', _coreProps(title));
@@ -109,7 +115,8 @@ class DocxBuilder {
 
   // -------------------------------------------------------------- fragmentos
 
-  static String _imageParagraph(int id, String rid, int cx, int cy) => '''
+  static String _imageParagraph(int id, String rid, int cx, int cy) =>
+      '''
 <w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:drawing>
 <wp:inline distT="0" distB="0" distL="0" distR="0">
 <wp:extent cx="$cx" cy="$cy"/>
@@ -158,7 +165,9 @@ class DocxBuilder {
 
   static String _contentTypes(Set<String> imageExts) {
     final defaults = StringBuffer()
-      ..write('<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>')
+      ..write(
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>',
+      )
       ..write('<Default Extension="xml" ContentType="application/xml"/>');
     for (final e in imageExts) {
       defaults.write('<Default Extension="$e" ContentType="image/$e"/>');
@@ -173,20 +182,23 @@ $defaults
 </Types>''';
   }
 
-  static String _rootRels() => '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+  static String _rootRels() =>
+      '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
 <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
 <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
 <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
 </Relationships>''';
 
-  static String _documentRels(String imageRels) => '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+  static String _documentRels(String imageRels) =>
+      '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
 <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
 $imageRels
 </Relationships>''';
 
-  static String _document(String body) => '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+  static String _document(String body) =>
+      '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document
   xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
   xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -202,7 +214,8 @@ $body
 </w:body>
 </w:document>''';
 
-  static String _styles() => '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+  static String _styles() =>
+      '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
 <w:docDefaults>
 <w:rPrDefault><w:rPr>
@@ -222,7 +235,7 @@ $body
 </w:styles>''';
 
   static String _coreProps(String title) {
-    final now = DateTime.now().toUtc().toIso8601String().split('.').first + 'Z';
+    final now = '${DateTime.now().toUtc().toIso8601String().split('.').first}Z';
     return '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <cp:coreProperties
   xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
@@ -237,7 +250,8 @@ $body
 </cp:coreProperties>''';
   }
 
-  static String _appProps() => '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+  static String _appProps() =>
+      '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Properties
   xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"
   xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">

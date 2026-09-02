@@ -54,7 +54,9 @@ RgbImage grayToRgb(GrayImage src) {
 
 /// Reduccion por caja (promedio de area): rapida y sin aliasing.
 GrayImage downscaleGray(GrayImage src, int dw, int dh) {
-  if (dw >= src.width || dh >= src.height) return src;
+  dw = dw.clamp(1, src.width);
+  dh = dh.clamp(1, src.height);
+  if (dw == src.width && dh == src.height) return src;
   final out = Uint8List(dw * dh);
   final xr = src.width / dw, yr = src.height / dh;
   for (var y = 0; y < dh; y++) {
@@ -78,7 +80,9 @@ GrayImage downscaleGray(GrayImage src, int dw, int dh) {
 }
 
 RgbImage downscaleRgb(RgbImage src, int dw, int dh) {
-  if (dw >= src.width && dh >= src.height) return src;
+  dw = dw.clamp(1, src.width);
+  dh = dh.clamp(1, src.height);
+  if (dw == src.width && dh == src.height) return src;
   final out = Uint8List(dw * dh * 3);
   final xr = src.width / dw, yr = src.height / dh;
   for (var y = 0; y < dh; y++) {

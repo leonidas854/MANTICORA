@@ -1,9 +1,13 @@
-import 'dart:typed_data';
+import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../../core/device_profile.dart';
+import '../../core/error_orchestrator.dart';
+import '../../core/logger.dart';
+import '../../core/validators.dart';
 import '../../imaging/geometry.dart';
 import '../../imaging/pipeline.dart';
 import '../../widgets/common.dart';
@@ -12,6 +16,8 @@ import '../scan/scan_screen.dart';
 import '../scan/scan_session.dart';
 import '../viewer/document_screen.dart';
 
+const String _tag = 'Escaneo';
+
 /// Lanza el flujo completo: camara -> edicion -> guardado.
 /// Si [appendToDocumentId] no es nulo, las paginas se anaden a ese documento.
 Future<void> startScan(
@@ -19,12 +25,20 @@ Future<void> startScan(
   WidgetRef ref, {
   String? appendToDocumentId,
 }) async {
-  final shots = await Navigator.push<List<CapturedShot>>(
+  final session = await Navigator.push<ScanSession>(
     context,
     MaterialPageRoute(builder: (_) => const ScanScreen()),
   );
-  if (shots == null || shots.isEmpty || !context.mounted) return;
-  await _editAndSave(context, shots, appendToDocumentId);
+  if (session == null) return;
+  if (session.shots.isEmpty) {
+    unawaited(session.dispose());
+    return;
+  }
+  if (!context.mounted) {
+    unawaited(session.dispose());
+    return;
+  }
+  await _editAndSave(context, session, appendToDocumentId);
 }
 
 /// Importa imagenes de la galeria y entra directo al editor.
@@ -33,52 +47,97 @@ Future<void> importImages(
   WidgetRef ref, {
   String? appendToDocumentId,
 }) async {
-  final files = await ImagePicker().pickMultiImage();
-  if (files.isEmpty || !context.mounted) return;
+  final files = await ErrorOrchestrator.guard<List<XFile>>(
+    'Abriendo la galeria',
+    () => ImagePicker().pickMultiImage(),
+    tag: _tag,
+  );
+  if (files == null || files.isEmpty || !context.mounted) return;
 
-  final shots = await runWithProgress<List<CapturedShot>>(
+  final profile = DeviceProfile.current;
+  final selection = files.take(profile.maxPagesPerExport).toList();
+  if (selection.length < files.length && context.mounted) {
+    showMessage(
+      context,
+      'Se importaran ${selection.length} imagenes; este dispositivo admite '
+      '${profile.maxPagesPerExport} de una vez.',
+    );
+  }
+
+  final session = ScanSession();
+  final built = await runWithProgress<int>(
     context,
     'Preparando imagenes...',
     (setMessage) async {
-      final out = <CapturedShot>[];
-      for (var i = 0; i < files.length; i++) {
-        setMessage('Analizando ${i + 1} de ${files.length}...');
-        final raw = await files[i].readAsBytes();
-        final shot = await _prepareShot(raw);
-        if (shot != null) out.add(shot);
+      var ok = 0;
+      for (var i = 0; i < selection.length; i++) {
+        setMessage('Analizando ${i + 1} de ${selection.length}...');
+        final added = await ErrorOrchestrator.guard(
+          'Importando la imagen ${i + 1}',
+          () => _addFromFile(session, selection[i]),
+          tag: _tag,
+          notifyUser: false,
+        );
+        if (added == true) ok++;
       }
-      return out;
+      return ok;
     },
   );
 
-  if (shots == null || shots.isEmpty || !context.mounted) return;
-  await _editAndSave(context, shots, appendToDocumentId);
+  if (built == null || built == 0) {
+    unawaited(session.dispose());
+    if (context.mounted) {
+      showMessage(context, 'No se ha podido importar ninguna imagen.', error: true);
+    }
+    return;
+  }
+  if (built < selection.length && context.mounted) {
+    showMessage(context, 'Importadas $built de ${selection.length} imagenes.');
+  }
+  if (!context.mounted) {
+    unawaited(session.dispose());
+    return;
+  }
+  await _editAndSave(context, session, appendToDocumentId);
 }
 
-Future<CapturedShot?> _prepareShot(Uint8List raw) async {
-  final jpeg = await ImagePipeline.normalizeToJpeg(raw);
-  if (jpeg == null) return null;
-  final decoded = await decodeImageFromList(jpeg);
-  final w = decoded.width, h = decoded.height;
-  decoded.dispose();
-  final quad = await ImagePipeline.detectInJpeg(jpeg);
-  return CapturedShot(
-    originalJpeg: jpeg,
-    width: w,
-    height: h,
-    quad: quad ?? Quad.inset(w.toDouble(), h.toDouble(), 0.04),
+Future<bool> _addFromFile(ScanSession session, XFile file) async {
+  final raw = await file.readAsBytes();
+
+  final sizeError = Validators.imageBytes(raw);
+  if (sizeError != null) {
+    Log.w(_tag, 'Imagen descartada: ${sizeError.message}');
+    return false;
+  }
+
+  final normalized = await ImagePipeline.normalizeWithSize(raw);
+  if (normalized == null) return false;
+
+  final quad = await ImagePipeline.detectInJpeg(normalized.jpeg);
+  await session.add(
+    normalized.jpeg,
+    width: normalized.width,
+    height: normalized.height,
+    quad: quad ??
+        Quad.inset(
+          normalized.width.toDouble(),
+          normalized.height.toDouble(),
+          0.04,
+        ),
   );
+  return true;
 }
 
 Future<void> _editAndSave(
   BuildContext context,
-  List<CapturedShot> shots,
+  ScanSession session,
   String? appendToDocumentId,
 ) async {
   final docId = await Navigator.push<String>(
     context,
     MaterialPageRoute(
-      builder: (_) => EditScreen(shots: shots, appendToDocumentId: appendToDocumentId),
+      builder: (_) =>
+          EditScreen(session: session, appendToDocumentId: appendToDocumentId),
     ),
   );
   if (docId == null || !context.mounted) return;

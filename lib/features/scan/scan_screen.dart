@@ -1,12 +1,17 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
-import 'dart:ui' as ui;
 
 import 'package:camera/camera.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../../core/device_profile.dart';
+import '../../core/error_orchestrator.dart';
+import '../../core/failure.dart';
+import '../../core/logger.dart';
+import '../../core/validators.dart';
+import '../../imaging/detector_worker.dart';
 import '../../imaging/geometry.dart';
 import '../../imaging/pipeline.dart';
 import '../../widgets/common.dart';
@@ -14,8 +19,9 @@ import '../../widgets/quad_overlay.dart';
 import 'scan_session.dart';
 
 /// Camara con deteccion de bordes en vivo y captura por lotes.
+///
+/// Devuelve la [ScanSession] con las capturas, o `null` si se cancela.
 class ScanScreen extends StatefulWidget {
-  /// Si es true, al terminar se devuelve la lista de capturas.
   const ScanScreen({super.key});
 
   @override
@@ -23,33 +29,40 @@ class ScanScreen extends StatefulWidget {
 }
 
 class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
-  CameraController? _controller;
-  List<CameraDescription> _cameras = const [];
-  Future<void>? _initFuture;
+  static const String _tag = 'Camara';
 
-  final List<CapturedShot> _shots = [];
+  final ScanSession _session = ScanSession();
+  final DeviceProfile _profile = DeviceProfile.current;
+
+  CameraController? _controller;
+  bool _initializing = true;
+  AppFailure? _cameraFailure;
 
   Quad? _liveQuad;
-  Size _lumaSize = Size.zero;
-  bool _detecting = false;
+  Size _previewSourceSize = Size.zero;
   DateTime _lastDetect = DateTime.fromMillisecondsSinceEpoch(0);
 
   bool _busy = false;
   bool _autoCapture = false;
   int _stableFrames = 0;
   FlashMode _flash = FlashMode.off;
+  bool _handedOff = false;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _initFuture = _setupCamera();
+    unawaited(DetectorWorker.instance.start());
+    unawaited(_setupCamera());
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _controller?.dispose();
+    unawaited(_teardownCamera());
+    unawaited(DetectorWorker.instance.stop());
+    // Si la pantalla se cierra sin entregar la tanda, se borran los temporales.
+    if (!_handedOff) unawaited(_session.dispose());
     super.dispose();
   }
 
@@ -57,87 +70,192 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final c = _controller;
     if (c == null || !c.value.isInitialized) return;
-    if (state == AppLifecycleState.inactive) {
-      c.dispose();
+    if (state == AppLifecycleState.inactive || state == AppLifecycleState.paused) {
+      unawaited(_teardownCamera());
     } else if (state == AppLifecycleState.resumed) {
-      setState(() => _initFuture = _setupCamera());
+      unawaited(_setupCamera());
     }
   }
 
+  // -------------------------------------------------------------- la camara
+
   Future<void> _setupCamera() async {
+    if (!mounted) return;
+    setState(() {
+      _initializing = true;
+      _cameraFailure = null;
+    });
+
+    final result = await ErrorOrchestrator.attempt<CameraController>(
+      'Abriendo la camara',
+      () async {
+        final cameras = await availableCameras();
+        if (cameras.isEmpty) {
+          throw const AppFailure(
+            kind: FailureKind.camera,
+            message: 'Este dispositivo no tiene ninguna camara disponible.',
+            retryable: false,
+          );
+        }
+        final back = cameras.firstWhere(
+          (c) => c.lensDirection == CameraLensDirection.back,
+          orElse: () => cameras.first,
+        );
+        final controller = CameraController(
+          back,
+          _presetFor(_profile.cameraQuality),
+          enableAudio: false,
+          imageFormatGroup: ImageFormatGroup.yuv420,
+        );
+        await controller.initialize().timeout(const Duration(seconds: 12));
+        return controller;
+      },
+      tag: _tag,
+      notifyUser: false,
+    );
+
+    await result.fold(
+      (controller) async {
+        if (!mounted) {
+          await controller.dispose();
+          return;
+        }
+        setState(() {
+          _controller = controller;
+          _initializing = false;
+        });
+        // Ni el flash ni el flujo de imagenes son imprescindibles: si fallan,
+        // la camara sigue sirviendo para hacer fotos.
+        await ErrorOrchestrator.guard(
+          'Configurando el flash',
+          () => controller.setFlashMode(_flash),
+          tag: _tag,
+          notifyUser: false,
+        );
+        await _startStream();
+        Log.i(_tag, 'Camara lista (${_profile.cameraQuality.name})');
+      },
+      (failure) async {
+        if (!mounted) return;
+        setState(() {
+          _initializing = false;
+          // Sin plugin de camara (escritorio) el mensaje generico despista:
+          // aqui lo util es que se puede seguir importando de la galeria.
+          _cameraFailure = failure.kind == FailureKind.unsupported
+              ? const AppFailure(
+                  kind: FailureKind.unsupported,
+                  message: 'Esta plataforma no tiene camara disponible. '
+                      'Puedes importar imagenes desde la galeria.',
+                  retryable: false,
+                )
+              : failure;
+        });
+      },
+    );
+  }
+
+  ResolutionPreset _presetFor(CameraQuality quality) => switch (quality) {
+        CameraQuality.medium => ResolutionPreset.medium,
+        CameraQuality.high => ResolutionPreset.high,
+        CameraQuality.veryHigh => ResolutionPreset.veryHigh,
+      };
+
+  Future<void> _startStream() async {
+    final c = _controller;
+    if (c == null || !c.value.isInitialized || c.value.isStreamingImages) return;
+    await ErrorOrchestrator.guard(
+      'Iniciando la vista previa',
+      () => c.startImageStream(_onFrame),
+      tag: _tag,
+      notifyUser: false,
+      onFailure: (_) => Log.w(_tag, 'Sin deteccion en vivo: el flujo no arranco'),
+    );
+  }
+
+  Future<void> _teardownCamera() async {
+    final c = _controller;
+    _controller = null;
+    if (c == null) return;
     try {
-      _cameras = await availableCameras();
-      if (_cameras.isEmpty) return;
-      final back = _cameras.firstWhere(
-        (c) => c.lensDirection == CameraLensDirection.back,
-        orElse: () => _cameras.first,
-      );
-      final controller = CameraController(
-        back,
-        ResolutionPreset.veryHigh,
-        enableAudio: false,
-        imageFormatGroup: ImageFormatGroup.yuv420,
-      );
-      await controller.initialize();
-      await controller.setFlashMode(_flash);
-      if (!mounted) {
-        await controller.dispose();
-        return;
-      }
-      setState(() => _controller = controller);
-      await controller.startImageStream(_onFrame);
-    } catch (e) {
-      if (mounted) showMessage(context, 'No se pudo abrir la camara: $e', error: true);
-    }
+      if (c.value.isStreamingImages) await c.stopImageStream();
+    } catch (_) {}
+    try {
+      await c.dispose();
+    } catch (_) {}
   }
 
   // ------------------------------------------------------- deteccion en vivo
 
   void _onFrame(CameraImage image) {
-    if (_detecting || _busy || !mounted) return;
-    // Limitamos a ~5 analisis por segundo: mas no aporta y calienta el movil.
+    if (!mounted || _busy) return;
+    // Cadencia segun la gama: en un movil basico analizar menos evita que la
+    // vista previa se atasque y que el telefono se caliente.
     final now = DateTime.now();
-    if (now.difference(_lastDetect).inMilliseconds < 200) return;
+    if (now.difference(_lastDetect) < _profile.liveDetectInterval) return;
+    if (DetectorWorker.instance.isBusy) return;
     _lastDetect = now;
-    _detecting = true;
 
-    final plane = image.planes.first;
-    final bytes = Uint8List.fromList(plane.bytes);
-    final w = image.width, h = image.height;
-    final stride = plane.bytesPerRow;
+    try {
+      if (image.planes.isEmpty) return;
+      final plane = image.planes.first;
+      final luma = Uint8List.fromList(plane.bytes);
+      final w = image.width, h = image.height;
+      if (w <= 0 || h <= 0) return;
 
-    ImagePipeline.detectInLuma(bytes, w, h, stride).then((quad) {
-      if (!mounted) {
-        _detecting = false;
-        return;
-      }
-      final rotated = _rotateForPreview(quad, w, h);
-      final stable = quad != null && _liveQuad != null && _similar(_liveQuad!, rotated!);
-      setState(() {
-        _liveQuad = rotated;
-        _lumaSize = _previewSourceSize(w, h);
-        _stableFrames = stable ? _stableFrames + 1 : 0;
+      DetectorWorker.instance
+          .detect(luma, w, h, plane.bytesPerRow,
+              targetSize: _profile.detectorWorkSize)
+          .then(_onQuadDetected)
+          .catchError((Object e, StackTrace st) {
+        Log.w(_tag, 'Fallo analizando un fotograma', e, st);
+        return null;
       });
-      _detecting = false;
-      if (_autoCapture && _stableFrames >= 4 && !_busy) {
-        _stableFrames = 0;
-        _capture();
+    } catch (e, st) {
+      Log.w(_tag, 'Fotograma descartado', e, st);
+    }
+  }
+
+  void _onQuadDetected(Quad? raw) {
+    if (!mounted) return;
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) return;
+
+    final preview = controller.value.previewSize;
+    final sourceW = preview?.height ?? 0;
+    final sourceH = preview?.width ?? 0;
+
+    final rotated = _rotateForPreview(raw);
+    final stable = rotated != null && _liveQuad != null && _similar(_liveQuad!, rotated);
+
+    setState(() {
+      _liveQuad = rotated;
+      if (sourceW > 0 && sourceH > 0) {
+        _previewSourceSize = _sensorOrientation % 180 == 90
+            ? Size(sourceW, sourceH)
+            : Size(sourceH, sourceW);
       }
-    }).catchError((_) {
-      _detecting = false;
+      _stableFrames = stable ? _stableFrames + 1 : 0;
     });
+
+    if (_autoCapture && _stableFrames >= 4 && !_busy) {
+      _stableFrames = 0;
+      unawaited(_capture());
+    }
   }
 
   int get _sensorOrientation => _controller?.description.sensorOrientation ?? 90;
 
-  Size _previewSourceSize(int w, int h) =>
-      (_sensorOrientation % 180 == 90) ? Size(h.toDouble(), w.toDouble()) : Size(w.toDouble(), h.toDouble());
-
   /// Los fotogramas llegan en la orientacion del sensor; la vista previa ya
   /// esta girada, asi que giramos tambien el cuadrilatero detectado.
-  Quad? _rotateForPreview(Quad? q, int w, int h) {
+  Quad? _rotateForPreview(Quad? q) {
     if (q == null) return null;
+    final controller = _controller;
+    final preview = controller?.value.previewSize;
+    if (preview == null) return q;
+    // previewSize viene en horizontal: ancho = height, alto = width.
+    final w = preview.height, h = preview.width;
     final deg = ((_sensorOrientation % 360) + 360) % 360;
+
     Pt map(Pt p) => switch (deg) {
           90 => Pt(h - p.y, p.x),
           180 => Pt(w - p.x, h - p.y),
@@ -160,53 +278,111 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
   Future<void> _capture() async {
     final c = _controller;
     if (c == null || !c.value.isInitialized || _busy) return;
+    if (_session.isFull) {
+      showMessage(
+        context,
+        'Maximo ${_session.maxShots} paginas por tanda. Guarda estas y sigue en otro documento.',
+        error: true,
+      );
+      return;
+    }
+
     setState(() => _busy = true);
     try {
       // Algunos dispositivos no permiten disparar con el flujo activo.
-      if (c.value.isStreamingImages) await c.stopImageStream();
-      final file = await c.takePicture();
-      final bytes = await file.readAsBytes();
+      if (c.value.isStreamingImages) {
+        await ErrorOrchestrator.guard('Pausando la vista previa',
+            c.stopImageStream, tag: _tag, notifyUser: false);
+      }
+
+      final shot = await ErrorOrchestrator.guard<XFile>(
+        'Tomando la foto',
+        () => c.takePicture().timeout(const Duration(seconds: 20)),
+        tag: _tag,
+      );
+      if (shot == null) return;
+
+      final bytes = await ErrorOrchestrator.guard<Uint8List>(
+        'Leyendo la foto',
+        shot.readAsBytes,
+        tag: _tag,
+      );
+      if (bytes == null) return;
+
       await _addShot(bytes);
-      if (mounted && c.value.isInitialized) await c.startImageStream(_onFrame);
-    } catch (e) {
-      if (mounted) showMessage(context, 'Error al capturar: $e', error: true);
+      // El fichero que deja el plugin ya no hace falta.
+      unawaited(_deleteQuietly(shot.path));
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted) {
+        setState(() => _busy = false);
+        await _startStream();
+      }
     }
   }
 
-  Future<void> _addShot(Uint8List jpeg) async {
-    final normalized = await ImagePipeline.normalizeToJpeg(jpeg) ?? jpeg;
-    final size = await _decodeSize(normalized);
-    final quad = await ImagePipeline.detectInJpeg(normalized);
-    if (!mounted) return;
-    setState(() {
-      _shots.add(CapturedShot(
-        originalJpeg: normalized,
-        width: size.width.round(),
-        height: size.height.round(),
-        quad: quad ?? Quad.inset(size.width, size.height, 0.04),
-      ));
-    });
-  }
+  /// Normaliza, detecta bordes y guarda la captura en disco.
+  Future<void> _addShot(Uint8List raw) async {
+    final validation = Validators.imageBytes(raw);
+    if (validation != null) {
+      ErrorOrchestrator.notify(validation);
+      return;
+    }
 
-  Future<Size> _decodeSize(Uint8List jpeg) async {
-    final codec = await ui.instantiateImageCodec(jpeg);
-    final frame = await codec.getNextFrame();
-    final size = Size(frame.image.width.toDouble(), frame.image.height.toDouble());
-    frame.image.dispose();
-    codec.dispose();
-    return size;
+    final added = await ErrorOrchestrator.guard(
+      'Preparando la captura',
+      () async {
+        final normalized = await ImagePipeline.normalizeWithSize(raw);
+        if (normalized == null) {
+          throw const AppFailure.validation(
+            'No se ha podido procesar la foto. Repitela, por favor.',
+          );
+        }
+        final quad = await ImagePipeline.detectInJpeg(normalized.jpeg);
+        return _session.add(
+          normalized.jpeg,
+          width: normalized.width,
+          height: normalized.height,
+          quad: quad ??
+              Quad.inset(
+                normalized.width.toDouble(),
+                normalized.height.toDouble(),
+                0.04,
+              ),
+        );
+      },
+      tag: _tag,
+    );
+
+    if (added != null && mounted) setState(() {});
   }
 
   Future<void> _pickFromGallery() async {
-    final picker = ImagePicker();
-    final files = await picker.pickMultiImage();
-    if (files.isEmpty) return;
+    if (_busy) return;
     setState(() => _busy = true);
     try {
-      for (final f in files) {
-        await _addShot(await f.readAsBytes());
+      final files = await ErrorOrchestrator.guard<List<XFile>>(
+        'Abriendo la galeria',
+        () => ImagePicker().pickMultiImage(),
+        tag: _tag,
+      );
+      if (files == null || files.isEmpty) return;
+
+      final allowed = _session.maxShots - _session.shots.length;
+      final selection = files.take(allowed).toList();
+      if (selection.length < files.length && mounted) {
+        showMessage(context,
+            'Solo caben ${selection.length} imagenes mas en esta tanda.');
+      }
+
+      for (final f in selection) {
+        if (!mounted) break;
+        final bytes = await ErrorOrchestrator.guard<Uint8List>(
+          'Leyendo una imagen de la galeria',
+          f.readAsBytes,
+          tag: _tag,
+          notifyUser: false,
+        );
+        if (bytes != null) await _addShot(bytes);
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -215,58 +391,156 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
 
   Future<void> _toggleFlash() async {
     final c = _controller;
-    if (c == null) return;
+    if (c == null || !c.value.isInitialized) return;
     final next = switch (_flash) {
       FlashMode.off => FlashMode.auto,
       FlashMode.auto => FlashMode.torch,
       _ => FlashMode.off,
     };
-    try {
-      await c.setFlashMode(next);
-      setState(() => _flash = next);
-    } catch (_) {}
+    final ok = await ErrorOrchestrator.guard<bool>(
+      'Cambiando el flash',
+      () async {
+        await c.setFlashMode(next);
+        return true;
+      },
+      tag: _tag,
+      notifyUser: false,
+    );
+    if (ok == true && mounted) setState(() => _flash = next);
+  }
+
+  Future<void> _removeLast() async {
+    if (_session.shots.isEmpty) return;
+    await _session.removeAt(_session.shots.length - 1);
+    if (mounted) setState(() {});
   }
 
   void _finish() {
-    if (_shots.isEmpty) {
+    if (_session.shots.isEmpty) {
       Navigator.pop(context);
       return;
     }
-    Navigator.pop(context, _shots);
+    _handedOff = true; // los temporales pasan a ser del editor
+    Navigator.pop(context, _session);
   }
 
   // ------------------------------------------------------------------- UI
 
   @override
   Widget build(BuildContext context) {
-    final controller = _controller;
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: Stack(
-        fit: StackFit.expand,
-        children: [
-          if (controller != null && controller.value.isInitialized)
-            FutureBuilder(
-              future: _initFuture,
-              builder: (context, _) => _CameraLayer(
-                controller: controller,
-                quad: _liveQuad,
-                sourceSize: _lumaSize,
+    return PopScope(
+      canPop: _session.shots.isEmpty,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        final discard = await confirm(
+          context,
+          title: 'Descartar la tanda',
+          message: 'Se perderan las ${_session.shots.length} paginas capturadas.',
+          confirmLabel: 'Descartar',
+          destructive: true,
+        );
+        if (discard && context.mounted) Navigator.pop(context);
+      },
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        body: Stack(
+          fit: StackFit.expand,
+          children: [
+            _cameraLayer(),
+            _topBar(),
+            _bottomBar(),
+            if (_busy)
+              const ColoredBox(
+                color: Colors.black38,
+                child: Center(child: CircularProgressIndicator()),
               ),
-            )
-          else
-            const Center(child: CircularProgressIndicator()),
-          _topBar(),
-          _bottomBar(),
-          if (_busy)
-            Container(
-              color: Colors.black38,
-              child: const Center(child: CircularProgressIndicator()),
-            ),
-        ],
+          ],
+        ),
       ),
     );
   }
+
+  Widget _cameraLayer() {
+    if (_initializing) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    final failure = _cameraFailure;
+    if (failure != null) {
+      return _cameraErrorState(failure);
+    }
+
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    final size = MediaQuery.sizeOf(context);
+    final preview = controller.value.previewSize;
+    final ratio = (preview == null || preview.width <= 0)
+        ? 1.0
+        : preview.height / preview.width;
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        FittedBox(
+          fit: BoxFit.cover,
+          child: SizedBox(
+            width: size.width,
+            height: size.width / (ratio == 0 ? 1 : ratio),
+            child: CameraPreview(controller),
+          ),
+        ),
+        if (_liveQuad != null && _previewSourceSize != Size.zero)
+          CustomPaint(
+            painter: QuadPainter(
+              quad: _liveQuad,
+              sourceSize: _previewSourceSize,
+              cover: true,
+            ),
+          ),
+      ],
+    );
+  }
+
+  /// Si la camara no arranca, la pantalla sigue siendo util: se puede importar.
+  Widget _cameraErrorState(AppFailure failure) => Center(
+        child: Padding(
+          padding: const EdgeInsets.all(28),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.no_photography_outlined,
+                  size: 48, color: Colors.white54),
+              const SizedBox(height: 16),
+              Text(
+                failure.message,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white70),
+              ),
+              const SizedBox(height: 24),
+              Wrap(
+                spacing: 12,
+                alignment: WrapAlignment.center,
+                children: [
+                  if (failure.retryable)
+                    FilledButton.icon(
+                      onPressed: _setupCamera,
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('Reintentar'),
+                    ),
+                  OutlinedButton.icon(
+                    onPressed: _pickFromGallery,
+                    icon: const Icon(Icons.photo_library_outlined),
+                    label: const Text('Usar la galeria'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      );
 
   Widget _topBar() => SafeArea(
         child: Align(
@@ -277,81 +551,102 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
               children: [
                 IconButton(
                   icon: const Icon(Icons.close, color: Colors.white),
-                  onPressed: () => Navigator.pop(context),
+                  onPressed: () => Navigator.maybePop(context),
                 ),
                 const Spacer(),
-                IconButton(
-                  tooltip: 'Flash',
-                  icon: Icon(
-                    switch (_flash) {
-                      FlashMode.off => Icons.flash_off,
-                      FlashMode.auto => Icons.flash_auto,
-                      _ => Icons.flash_on,
-                    },
-                    color: Colors.white,
+                if (_controller != null) ...[
+                  IconButton(
+                    tooltip: 'Flash',
+                    icon: Icon(
+                      switch (_flash) {
+                        FlashMode.off => Icons.flash_off,
+                        FlashMode.auto => Icons.flash_auto,
+                        _ => Icons.flash_on,
+                      },
+                      color: Colors.white,
+                    ),
+                    onPressed: _toggleFlash,
                   ),
-                  onPressed: _toggleFlash,
-                ),
-                IconButton(
-                  tooltip: 'Captura automatica',
-                  icon: Icon(
-                    _autoCapture ? Icons.motion_photos_auto : Icons.motion_photos_off,
-                    color: _autoCapture ? Theme.of(context).colorScheme.primary : Colors.white,
+                  IconButton(
+                    tooltip: 'Captura automatica',
+                    icon: Icon(
+                      _autoCapture
+                          ? Icons.motion_photos_auto
+                          : Icons.motion_photos_off,
+                      color: _autoCapture
+                          ? Theme.of(context).colorScheme.primary
+                          : Colors.white,
+                    ),
+                    onPressed: () => setState(() => _autoCapture = !_autoCapture),
                   ),
-                  onPressed: () => setState(() => _autoCapture = !_autoCapture),
-                ),
+                ],
               ],
             ),
           ),
         ),
       );
 
-  Widget _bottomBar() => Align(
-        alignment: Alignment.bottomCenter,
-        child: Container(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-              colors: [Colors.transparent, Colors.black.withValues(alpha: 0.75)],
-            ),
+  Widget _bottomBar() {
+    final shots = _session.shots;
+    return Align(
+      alignment: Alignment.bottomCenter,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Colors.transparent, Colors.black.withValues(alpha: 0.75)],
           ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (_shots.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 14),
-                  child: SizedBox(
-                    height: 58,
-                    child: ListView.separated(
-                      scrollDirection: Axis.horizontal,
-                      itemCount: _shots.length,
-                      separatorBuilder: (_, __) => const SizedBox(width: 8),
-                      itemBuilder: (context, i) => ClipRRect(
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (shots.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 14),
+                child: SizedBox(
+                  height: 58,
+                  child: ListView.separated(
+                    scrollDirection: Axis.horizontal,
+                    reverse: true,
+                    itemCount: shots.length,
+                    separatorBuilder: (_, _) => const SizedBox(width: 8),
+                    itemBuilder: (context, i) {
+                      final shot = shots[shots.length - 1 - i];
+                      return ClipRRect(
                         borderRadius: BorderRadius.circular(8),
-                        child: Image.memory(
-                          _shots[i].originalJpeg,
+                        child: Image.file(
+                          shot.file,
                           width: 44,
                           height: 58,
                           fit: BoxFit.cover,
+                          cacheWidth: 96,
                           gaplessPlayback: true,
+                          errorBuilder: (_, _, _) => const SizedBox(
+                            width: 44,
+                            height: 58,
+                            child: ColoredBox(color: Colors.white12),
+                          ),
                         ),
-                      ),
-                    ),
+                      );
+                    },
                   ),
                 ),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  IconButton.filledTonal(
-                    iconSize: 26,
-                    onPressed: _busy ? null : _pickFromGallery,
-                    icon: const Icon(Icons.photo_library_outlined),
-                  ),
-                  GestureDetector(
-                    onTap: _busy ? null : _capture,
+              ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                IconButton.filledTonal(
+                  iconSize: 26,
+                  onPressed: _busy ? null : _pickFromGallery,
+                  icon: const Icon(Icons.photo_library_outlined),
+                ),
+                GestureDetector(
+                  onTap: (_busy || _controller == null) ? null : _capture,
+                  onLongPress: shots.isEmpty ? null : _removeLast,
+                  child: Opacity(
+                    opacity: _controller == null ? 0.4 : 1,
                     child: Container(
                       width: 74,
                       height: 74,
@@ -368,57 +663,29 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
                       ),
                     ),
                   ),
-                  Badge(
-                    isLabelVisible: _shots.isNotEmpty,
-                    label: Text('${_shots.length}'),
-                    child: FilledButton(
-                      onPressed: _shots.isEmpty ? null : _finish,
-                      child: const Text('Listo'),
-                    ),
+                ),
+                Badge(
+                  isLabelVisible: shots.isNotEmpty,
+                  label: Text('${shots.length}'),
+                  child: FilledButton(
+                    onPressed: shots.isEmpty ? null : _finish,
+                    child: const Text('Listo'),
                   ),
-                ],
-              ),
-            ],
-          ),
+                ),
+              ],
+            ),
+          ],
         ),
-      );
-}
-
-/// Vista previa a pantalla completa con el contorno detectado encima.
-class _CameraLayer extends StatelessWidget {
-  final CameraController controller;
-  final Quad? quad;
-  final Size sourceSize;
-
-  const _CameraLayer({
-    required this.controller,
-    required this.quad,
-    required this.sourceSize,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final size = MediaQuery.sizeOf(context);
-    final preview = controller.value.previewSize;
-    // previewSize viene en orientacion horizontal; en vertical hay que girarlo.
-    final ratio = preview == null ? 1.0 : preview.height / preview.width;
-
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        FittedBox(
-          fit: BoxFit.cover,
-          child: SizedBox(
-            width: size.width,
-            height: size.width / ratio,
-            child: CameraPreview(controller),
-          ),
-        ),
-        if (quad != null)
-          CustomPaint(
-            painter: QuadPainter(quad: quad, sourceSize: sourceSize, cover: true),
-          ),
-      ],
+      ),
     );
   }
+}
+
+/// Borrado tolerante: el temporal que deja el plugin ya no hace falta y su
+/// borrado nunca debe interrumpir el flujo de captura.
+Future<void> _deleteQuietly(String path) async {
+  try {
+    final f = File(path);
+    if (await f.exists()) await f.delete();
+  } catch (_) {}
 }

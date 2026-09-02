@@ -3,6 +3,8 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
+import '../../core/device_profile.dart';
+import '../../core/error_orchestrator.dart';
 import '../../imaging/geometry.dart';
 import '../../imaging/pipeline.dart';
 import '../../widgets/common.dart';
@@ -36,7 +38,9 @@ class CropScreen extends StatefulWidget {
 }
 
 class _CropScreenState extends State<CropScreen> {
-  static const int _previewSide = 1400;
+  /// El editor de esquinas no necesita la imagen completa: con una version
+  /// reducida se mueve igual de bien y se ahorra memoria en gama baja.
+  int get _previewSide => DeviceProfile.current.cropPreviewSide;
 
   ui.Image? _preview;
   double _scale = 1; // original / preview
@@ -58,36 +62,62 @@ class _CropScreenState extends State<CropScreen> {
   }
 
   Future<void> _load() async {
-    // Decodificamos reducido: mover esquinas sobre una imagen de 12 MP
-    // gastaria memoria sin ganar precision visual.
-    final longest = widget.originalWidth > widget.originalHeight
-        ? widget.originalWidth
-        : widget.originalHeight;
-    final target = longest > _previewSide ? _previewSide : longest;
-    final codec = await ui.instantiateImageCodec(
-      widget.imageBytes,
-      targetWidth: widget.originalWidth >= widget.originalHeight ? target : null,
-      targetHeight: widget.originalHeight > widget.originalWidth ? target : null,
+    final image = await ErrorOrchestrator.guard<ui.Image>(
+      'Cargando la imagen para recortar',
+      () async {
+        // Decodificamos reducido: mover esquinas sobre una imagen de 12 MP
+        // gastaria memoria sin ganar precision visual.
+        final longest = widget.originalWidth > widget.originalHeight
+            ? widget.originalWidth
+            : widget.originalHeight;
+        final target = longest > _previewSide ? _previewSide : longest;
+        final codec = await ui.instantiateImageCodec(
+          widget.imageBytes,
+          targetWidth:
+              widget.originalWidth >= widget.originalHeight ? target : null,
+          targetHeight:
+              widget.originalHeight > widget.originalWidth ? target : null,
+        );
+        final frame = await codec.getNextFrame();
+        codec.dispose();
+        return frame.image;
+      },
+      tag: 'Recorte',
     );
-    final frame = await codec.getNextFrame();
-    codec.dispose();
-    if (!mounted) {
-      frame.image.dispose();
+
+    if (image == null) {
+      if (mounted) Navigator.pop(context);
       return;
     }
-    final scale = widget.originalWidth / frame.image.width;
+    if (!mounted) {
+      image.dispose();
+      return;
+    }
+    if (image.width <= 0) {
+      image.dispose();
+      if (mounted) Navigator.pop(context);
+      return;
+    }
+
+    final scale = widget.originalWidth / image.width;
     setState(() {
-      _preview = frame.image;
+      _preview = image;
       _scale = scale;
       final q = widget.initialQuad ??
-          Quad.inset(widget.originalWidth.toDouble(), widget.originalHeight.toDouble(), 0.05);
+          Quad.inset(widget.originalWidth.toDouble(),
+              widget.originalHeight.toDouble(), 0.05);
       _quad = q.scaled(1 / scale, 1 / scale);
     });
   }
 
   Future<void> _autoDetect() async {
+    if (_busy) return;
     setState(() => _busy = true);
-    final detected = await ImagePipeline.detectInJpeg(widget.imageBytes);
+    final detected = await ErrorOrchestrator.guard(
+      'Detectando los bordes',
+      () => ImagePipeline.detectInJpeg(widget.imageBytes),
+      tag: 'Recorte',
+    );
     if (!mounted) return;
     setState(() {
       _busy = false;

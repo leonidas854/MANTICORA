@@ -93,9 +93,12 @@ RgbImage applyFilter(RgbImage src, ScanFilter filter, [Adjustments adj = Adjustm
 /// integrales de tamano completo (que serian cientos de MB en un movil).
 RgbImage _illuminationMap(RgbImage src, {int targetSide = 96}) {
   final scale = targetSide / math.max(src.width, src.height);
-  final sw = math.max(4, (src.width * scale).round());
-  final sh = math.max(4, (src.height * scale).round());
-  final small = downscaleRgb(src, sw, sh);
+  // Si la imagen ya es mas pequena que el objetivo, se usa tal cual.
+  final small = scale >= 1
+      ? src
+      : downscaleRgb(src, math.max(4, (src.width * scale).round()),
+          math.max(4, (src.height * scale).round()));
+  final sw = small.width, sh = small.height;
 
   // Filtro de maximo local suavizado: el fondo del papel es lo mas claro.
   final r = math.max(1, math.min(sw, sh) ~/ 6);

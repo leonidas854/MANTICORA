@@ -1,6 +1,26 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Escaneo con la camara. -->
+    <uses-permission android:name="android.permission.CAMERA"/>
+    <uses-feature android:name="android.hardware.camera" android:required="false"/>
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false"/>
+
+    <!-- Autenticacion biometrica para el bloqueo de la app. -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC"/>
+
+    <!-- El plugin de camara declara el microfono para grabar video; aqui solo
+         se hacen fotos (enableAudio: false), asi que se elimina del manifiesto
+         final: un escaner de documentos no tiene por que pedir el microfono. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" tools:node="remove"/>
+
+    <!-- En Android 13+ se usan el selector de fotos y el SAF, que no requieren
+         permiso de almacenamiento. -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" tools:replace="android:maxSdkVersion"/>
+
     <application
-        android:label="manticora"
+        android:label="Manticora"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
@@ -30,6 +50,11 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+
+        <!-- Descarga el modelo de OCR al instalar, para que funcione sin conexion. -->
+        <meta-data
+            android:name="com.google.mlkit.vision.DEPENDENCIES"
+            android:value="ocr" />
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and
@@ -40,6 +65,15 @@
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
+        </intent>
+        <!-- Necesario para abrir y compartir los PDF/Word generados. -->
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:mimeType="*/*"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SEND"/>
+            <data android:mimeType="*/*"/>
         </intent>
     </queries>
 </manifest>

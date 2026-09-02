@@ -4,6 +4,8 @@ import 'dart:typed_data';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 
+import '../core/failure.dart';
+import '../core/logger.dart';
 import '../imaging/ocr_service.dart';
 
 /// Tamano de pagina del PDF resultante.
@@ -65,6 +67,34 @@ class PdfBuilder {
     bool searchableText = true,
     String? watermark,
   }) async {
+    if (pages.isEmpty) {
+      throw const AppFailure.validation('No hay paginas que incluir en el PDF.');
+    }
+    try {
+      return await _build(
+        pages: pages,
+        title: title,
+        pageSize: pageSize,
+        margin: margin,
+        searchableText: searchableText,
+        watermark: watermark,
+      );
+    } on AppFailure {
+      rethrow;
+    } catch (e, st) {
+      Log.e('PDF', 'Error construyendo el PDF', e, st);
+      throw AppFailure.from(e, st, 'Construyendo el PDF');
+    }
+  }
+
+  static Future<Uint8List> _build({
+    required List<PdfPageInput> pages,
+    required String title,
+    required PdfPageSize pageSize,
+    required double margin,
+    required bool searchableText,
+    String? watermark,
+  }) async {
     final doc = pw.Document(
       title: title,
       author: 'Manticora',
@@ -72,10 +102,14 @@ class PdfBuilder {
       compress: true,
     );
 
+    var added = 0;
     for (final input in pages) {
+      if (input.jpeg.isEmpty) continue;
       final image = pw.MemoryImage(input.jpeg);
-      final imgW = input.imageWidth > 0 ? input.imageWidth.toDouble() : image.width.toDouble();
-      final imgH = input.imageHeight > 0 ? input.imageHeight.toDouble() : image.height.toDouble();
+      final imgW =
+          (input.imageWidth > 0 ? input.imageWidth : (image.width ?? 1000)).toDouble();
+      final imgH =
+          (input.imageHeight > 0 ? input.imageHeight : (image.height ?? 1414)).toDouble();
 
       final format = _formatFor(pageSize, imgW, imgH, margin);
       final availW = format.width - format.marginLeft - format.marginRight;
@@ -139,8 +173,16 @@ class PdfBuilder {
           },
         ),
       );
+      added++;
     }
 
+    if (added == 0) {
+      throw const AppFailure(
+        kind: FailureKind.pdf,
+        message: 'Ninguna de las paginas se ha podido incluir en el PDF.',
+        retryable: false,
+      );
+    }
     return doc.save();
   }
 

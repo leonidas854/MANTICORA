@@ -1,48 +1,90 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
-/// Ejecuta una tarea larga mostrando un dialogo de progreso no cancelable.
+import '../core/error_orchestrator.dart';
+import '../core/failure.dart';
+import '../core/logger.dart';
+
+/// Ejecuta una tarea larga mostrando un dialogo de progreso.
+///
+/// Absorbe cualquier excepcion: la registra, avisa a la persona con un mensaje
+/// comprensible y devuelve `null`. Asi ninguna pantalla se queda con el
+/// dialogo colgado ni revienta por un fallo de la tarea.
 Future<T?> runWithProgress<T>(
   BuildContext context,
   String message,
-  Future<T> Function(void Function(String) setMessage) task,
-) async {
+  Future<T> Function(void Function(String) setMessage) task, {
+  String tag = 'Tarea',
+  bool notifyOnError = true,
+  Duration showAfter = const Duration(milliseconds: 140),
+}) async {
   final notifier = ValueNotifier<String>(message);
-  var dialogOpen = true;
 
-  showDialog<void>(
-    context: context,
-    barrierDismissible: false,
-    builder: (_) => PopScope(
-      canPop: false,
-      child: Dialog(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 28),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const SizedBox(
-                width: 26,
-                height: 26,
-                child: CircularProgressIndicator(strokeWidth: 3),
+  BuildContext? dialogContext;
+  Future<void>? dialogClosed;
+  var finished = false;
+
+  // El dialogo solo aparece si la tarea tarda de verdad. Asi se evita el
+  // parpadeo en las operaciones rapidas y, sobre todo, la carrera de mostrar
+  // un dialogo para algo que ya termino.
+  final timer = Timer(showAfter, () {
+    if (finished || !context.mounted) return;
+    dialogClosed = showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      useRootNavigator: true,
+      builder: (ctx) {
+        dialogContext = ctx;
+        return PopScope(
+          canPop: false,
+          child: Dialog(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 28),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const SizedBox(
+                    width: 26,
+                    height: 26,
+                    child: CircularProgressIndicator(strokeWidth: 3),
+                  ),
+                  const SizedBox(width: 20),
+                  Expanded(
+                    child: ValueListenableBuilder<String>(
+                      valueListenable: notifier,
+                      builder: (_, value, _) => Text(value),
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(width: 20),
-              Expanded(
-                child: ValueListenableBuilder<String>(
-                  valueListenable: notifier,
-                  builder: (_, value, __) => Text(value),
-                ),
-              ),
-            ],
+            ),
           ),
-        ),
-      ),
-    ),
-  ).then((_) => dialogOpen = false);
+        );
+      },
+    );
+  });
 
   try {
-    return await task((m) => notifier.value = m);
+    return await task((m) {
+      if (!finished) notifier.value = m;
+    });
+  } catch (error, stack) {
+    final failure = AppFailure.from(error, stack, message);
+    Log.e(tag, 'Fallo la tarea "$message"', error, stack);
+    if (notifyOnError) ErrorOrchestrator.notify(failure);
+    return null;
   } finally {
-    if (dialogOpen && context.mounted) Navigator.of(context, rootNavigator: true).pop();
+    finished = true;
+    timer.cancel();
+
+    final ctx = dialogContext;
+    if (ctx != null && ctx.mounted) Navigator.of(ctx).pop();
+    dialogContext = null;
+
+    // El notificador debe seguir vivo mientras el dialogo se desmonta: si se
+    // libera antes, el ValueListenableBuilder lo usaria ya liberado.
+    if (dialogClosed != null) await dialogClosed;
     notifier.dispose();
   }
 }
@@ -66,7 +108,9 @@ Future<bool> confirm(
         ),
         FilledButton(
           style: destructive
-              ? FilledButton.styleFrom(backgroundColor: Theme.of(ctx).colorScheme.error)
+              ? FilledButton.styleFrom(
+                  backgroundColor: Theme.of(ctx).colorScheme.error,
+                )
               : null,
           onPressed: () => Navigator.pop(ctx, true),
           child: Text(confirmLabel),
@@ -118,10 +162,12 @@ void showMessage(BuildContext context, String message, {bool error = false}) {
   if (!context.mounted) return;
   ScaffoldMessenger.of(context)
     ..hideCurrentSnackBar()
-    ..showSnackBar(SnackBar(
-      content: Text(message),
-      backgroundColor: error ? Theme.of(context).colorScheme.error : null,
-    ));
+    ..showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: error ? Theme.of(context).colorScheme.error : null,
+      ),
+    );
 }
 
 /// Estado vacio con icono, titulo y accion opcional.
@@ -160,9 +206,7 @@ class EmptyState extends StatelessWidget {
             Text(
               title,
               textAlign: TextAlign.center,
-              style: Theme.of(context)
-                  .textTheme
-                  .titleMedium
+              style: Theme.of(context).textTheme.titleMedium
                   ?.copyWith(fontWeight: FontWeight.w600),
             ),
             if (subtitle != null) ...[
@@ -170,9 +214,7 @@ class EmptyState extends StatelessWidget {
               Text(
                 subtitle!,
                 textAlign: TextAlign.center,
-                style: Theme.of(context)
-                    .textTheme
-                    .bodyMedium
+                style: Theme.of(context).textTheme.bodyMedium
                     ?.copyWith(color: scheme.onSurfaceVariant),
               ),
             ],
