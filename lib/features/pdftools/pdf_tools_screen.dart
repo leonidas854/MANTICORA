@@ -507,7 +507,9 @@ class _PdfToolsScreenState extends ConsumerState<PdfToolsScreen> {
 
     final result = await runWithProgress<Uint8List>(context, 'Extrayendo texto...',
         (setMessage) async {
-      final texts = PdfTools.extractText(source, password: password);
+      final texts = PdfTools.extractText(source, password: password)
+          .map(PdfTools.normalizeExtractedText)
+          .toList();
       setMessage('Creando documento Word...');
       return DocxBuilder.build(
         pages: [for (final t in texts) DocxPageInput(text: t)],

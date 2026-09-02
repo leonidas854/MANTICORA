@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart' as ffi;
@@ -250,6 +251,13 @@ class AppDatabase {
     } catch (e) {
       Log.w(_tag, 'No se pudo compactar la base de datos', e);
     }
+  }
+
+  /// Cierra y olvida el estado. Solo para pruebas.
+  @visibleForTesting
+  Future<void> resetForTesting() async {
+    await close();
+    _ftsAvailable = false;
   }
 
   Future<void> close() async {

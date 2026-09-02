@@ -192,6 +192,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       return const EmptyState(
         icon: Icons.delete_outline,
         title: 'La papelera esta vacia',
+        subtitle: 'Lo que borres aparecera aqui y podras recuperarlo '
+            'manteniendolo pulsado.',
       );
     }
     if (query.search.isNotEmpty) {

@@ -14,6 +14,7 @@ import '../imaging/ocr_service.dart';
 import '../imaging/pipeline.dart';
 import 'docx_builder.dart';
 import 'pdf_builder.dart';
+import 'table_extractor.dart';
 
 /// Formatos de salida ofrecidos al usuario.
 enum ExportFormat { pdf, docx, text, jpeg }
@@ -233,11 +234,22 @@ class ExportService {
         }
       }
 
+      // Con las cajas del OCR se reconstruye la estructura: lo que era una
+      // tabla en el papel sale como tabla en Word, no como parrafos sueltos.
+      final ocrLines = OcrResult.parseBoxes(page.ocrBoxes);
+      final blocks = ocrLines.isEmpty
+          ? const <DocBlock>[]
+          : TableExtractor.analyze(
+              ocrLines,
+              pageWidth: (page.width > 0 ? page.width : 1000).toDouble(),
+            );
+
       inputs.add(DocxPageInput(
         jpeg: bytes,
         imageWidth: w,
         imageHeight: h,
         text: page.ocrText ?? '',
+        blocks: blocks,
       ));
 
       if ((i + 1) % profile.pagesBeforeYield == 0) {
@@ -264,11 +276,31 @@ class ExportService {
     final buf = StringBuffer('${doc.document.title}\n\n');
     var withText = 0;
     for (var i = 0; i < doc.pages.length; i++) {
-      final t = doc.pages[i].ocrText ?? '';
-      if (t.trim().isEmpty) continue;
+      final page = doc.pages[i];
+      final plain = page.ocrText ?? '';
+      if (plain.trim().isEmpty) continue;
       withText++;
       if (doc.pages.length > 1) buf.writeln('--- Pagina ${i + 1} ---');
-      buf.writeln(t.trim());
+
+      // Si se reconocio una tabla, se vuelca con tabuladores para que se
+      // pueda pegar en una hoja de calculo.
+      final lines = OcrResult.parseBoxes(page.ocrBoxes);
+      if (lines.isEmpty) {
+        buf.writeln(plain.trim());
+      } else {
+        final blocks = TableExtractor.analyze(
+          lines,
+          pageWidth: (page.width > 0 ? page.width : 1000).toDouble(),
+        );
+        for (final block in blocks) {
+          switch (block) {
+            case ParagraphBlock(:final text):
+              if (text.trim().isNotEmpty) buf.writeln(text.trim());
+            case TableBlock():
+              buf.writeln(block.toPlainText());
+          }
+        }
+      }
       buf.writeln();
     }
 

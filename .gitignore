@@ -89,6 +89,10 @@ android/.gradle/
 *.db-wal
 *.db.corrupta
 
+# Documentos reales usados por las pruebas de calidad: se descargan con
+# './setup.sh corpus' y las pruebas se saltan solas si no estan.
+/test/corpus/
+
 # Cobertura de pruebas
 /coverage/
 lcov.info

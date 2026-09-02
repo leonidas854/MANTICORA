@@ -3,6 +3,8 @@ import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
 
+import 'table_extractor.dart';
+
 /// Que se vuelca en el documento de Word.
 enum DocxMode {
   textAndImages('Texto e imagenes'),
@@ -17,14 +19,23 @@ enum DocxMode {
 class DocxPageInput {
   final Uint8List? jpeg;
   final int imageWidth, imageHeight;
+
+  /// Texto plano de la pagina. Se usa si no hay [blocks].
   final String text;
+
+  /// Estructura reconocida (parrafos y tablas). Si viene rellena, manda sobre
+  /// [text]: es lo que permite que una factura salga como tabla de verdad.
+  final List<DocBlock> blocks;
 
   const DocxPageInput({
     this.jpeg,
     this.imageWidth = 0,
     this.imageHeight = 0,
     this.text = '',
+    this.blocks = const [],
   });
+
+  bool get hasContent => blocks.isNotEmpty || text.trim().isNotEmpty;
 }
 
 /// Genera un .docx (OOXML) valido sin dependencias externas ni conexion.
@@ -76,12 +87,23 @@ class DocxBuilder {
         body.write(_imageParagraph(imageIndex, rid, cx, cy));
       }
 
-      if (mode != DocxMode.imagesOnly && page.text.trim().isNotEmpty) {
+      if (mode != DocxMode.imagesOnly && page.hasContent) {
         if (mode == DocxMode.textAndImages) {
           body.write(_heading('Pagina ${i + 1}'));
         }
-        for (final line in const LineSplitter().convert(page.text)) {
-          body.write(_paragraph(line));
+        if (page.blocks.isNotEmpty) {
+          for (final block in page.blocks) {
+            switch (block) {
+              case ParagraphBlock(:final text):
+                body.write(_paragraph(text));
+              case TableBlock():
+                body.write(_table(block));
+            }
+          }
+        } else {
+          for (final line in const LineSplitter().convert(page.text)) {
+            body.write(_paragraph(line));
+          }
         }
       }
 
@@ -133,6 +155,59 @@ class DocxBuilder {
 </a:graphicData></a:graphic>
 </wp:inline>
 </w:drawing></w:r></w:p>''';
+
+  /// Ancho util de una A4 con margenes de 2 cm, en twips.
+  static const int _contentWidthTwips = 9638;
+
+  /// Una tabla real de Word: rejilla declarada, bordes visibles y una celda
+  /// por campo. Word exige ademas un parrafo detras de cada tabla.
+  static String _table(TableBlock table) {
+    if (table.rows.isEmpty) return '';
+    final columns = table.columnCount;
+    if (columns == 0) return '';
+    final columnWidth = _contentWidthTwips ~/ columns;
+
+    final buf = StringBuffer()
+      ..write('<w:tbl>')
+      ..write('<w:tblPr>')
+      ..write('<w:tblStyle w:val="TableGrid"/>')
+      ..write('<w:tblW w:w="0" w:type="auto"/>')
+      ..write('<w:tblBorders>');
+    for (final edge in ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']) {
+      buf.write('<w:$edge w:val="single" w:sz="4" w:space="0" w:color="auto"/>');
+    }
+    buf..write('</w:tblBorders>')..write('</w:tblPr>')..write('<w:tblGrid>');
+    for (var c = 0; c < columns; c++) {
+      buf.write('<w:gridCol w:w="$columnWidth"/>');
+    }
+    buf.write('</w:tblGrid>');
+
+    for (var r = 0; r < table.rows.length; r++) {
+      final row = table.rows[r];
+      buf.write('<w:tr>');
+      for (var c = 0; c < columns; c++) {
+        final value = c < row.length ? row[c] : '';
+        buf
+          ..write('<w:tc>')
+          ..write('<w:tcPr><w:tcW w:w="$columnWidth" w:type="dxa"/></w:tcPr>')
+          ..write('<w:p>');
+        // La primera fila se marca en negrita: casi siempre es la cabecera.
+        if (r == 0) {
+          buf.write('<w:pPr><w:rPr><w:b/></w:rPr></w:pPr>'
+              '<w:r><w:rPr><w:b/></w:rPr>'
+              '<w:t xml:space="preserve">${_esc(value)}</w:t></w:r>');
+        } else {
+          buf.write('<w:r><w:t xml:space="preserve">${_esc(value)}</w:t></w:r>');
+        }
+        buf..write('</w:p>')..write('</w:tc>');
+      }
+      buf.write('</w:tr>');
+    }
+    buf..write('</w:tbl>')
+      // Word necesita un parrafo detras de cada tabla.
+      ..write('<w:p/>');
+    return buf.toString();
+  }
 
   static String _paragraph(String text) =>
       '<w:p><w:r><w:t xml:space="preserve">${_esc(text)}</w:t></w:r></w:p>';
@@ -226,6 +301,19 @@ $body
 </w:docDefaults>
 <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
 <w:name w:val="Normal"/><w:qFormat/>
+</w:style>
+<w:style w:type="table" w:styleId="TableGrid">
+<w:name w:val="Table Grid"/><w:qFormat/>
+<w:tblPr>
+<w:tblBorders>
+<w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>
+<w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/>
+<w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/>
+<w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/>
+<w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/>
+<w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>
+</w:tblBorders>
+</w:tblPr>
 </w:style>
 <w:style w:type="paragraph" w:styleId="Heading2">
 <w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:qFormat/>

@@ -359,6 +359,36 @@ class PdfTools {
     }
   }
 
+  /// Junta las palabras que muchos PDF devuelven en lineas sueltas.
+  ///
+  /// Al extraer texto de un PDF es habitual recibir **una palabra por linea**,
+  /// porque el fichero coloca cada palabra por separado. Volcarlo tal cual a
+  /// Word daba un parrafo por palabra, que es ilegible. Aqui se detecta ese
+  /// patron y se rehacen las frases, dejando intacto el texto que ya viene
+  /// bien formado.
+  static String normalizeExtractedText(String raw) {
+    final text = raw.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+    final lines = text
+        .split('\n')
+        .map((l) => l.trim())
+        .where((l) => l.isNotEmpty)
+        .toList();
+    if (lines.isEmpty) return '';
+
+    // Con pocas lineas no hay patron que valga: un titulo de dos palabras no
+    // es texto fragmentado.
+    if (lines.length < 6) return lines.join('\n');
+
+    final singleWord = lines.where((l) => !l.contains(' ')).length;
+    final fragmented = singleWord / lines.length > 0.6;
+    if (!fragmented) return lines.join('\n');
+
+    // Se rehace el flujo y se corta en frases, que es lo que se espera leer.
+    final flowing = lines.join(' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+    final sentences = flowing.split(RegExp(r'(?<=[.!?])\s+'));
+    return sentences.where((s) => s.trim().isNotEmpty).join('\n');
+  }
+
   /// Rasteriza el PDF a JPEG, una imagen por pagina.
   ///
   /// Usa el motor nativo (pdfium) a traves del paquete `printing`, asi que

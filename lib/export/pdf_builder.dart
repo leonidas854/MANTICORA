@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:pdf/pdf.dart';
@@ -207,19 +208,26 @@ class PdfBuilder {
       if (left < -8 || top < -8 || left > offX + drawW + 8 || top > offY + drawH + 8) {
         continue;
       }
+      // El tamano se calcula para que la linea ocupe aproximadamente el ancho
+      // de su caja. NO se usa FittedBox ni se limita el ancho: cualquier
+      // restriccion hace que la linea se parta y el PDF pierda texto al
+      // buscarlo (una linea como "Pagina 1" acababa guardada como "Pagina").
+      final byHeight = (h * 0.82).clamp(4.0, 72.0);
+      final byWidth = text.isEmpty ? byHeight : (w / (text.length * 0.52));
+      final fontSize = math.min(byHeight, byWidth.clamp(4.0, 72.0));
+
       out.add(
         pw.Positioned(
           left: left,
           top: top,
           child: pw.Opacity(
             opacity: 0,
-            child: pw.SizedBox(
-              width: w,
-              height: h,
-              child: pw.FittedBox(
-                fit: pw.BoxFit.fill,
-                child: pw.Text(text, style: pw.TextStyle(fontSize: h.clamp(4, 72))),
-              ),
+            child: pw.Text(
+              text,
+              maxLines: 1,
+              softWrap: false,
+              overflow: pw.TextOverflow.visible,
+              style: pw.TextStyle(fontSize: fontSize),
             ),
           ),
         ),

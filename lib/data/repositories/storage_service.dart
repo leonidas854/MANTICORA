@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
@@ -40,6 +41,14 @@ class StorageService {
     } finally {
       _preparing = null;
     }
+  }
+
+  /// Olvida la carpeta cacheada. Solo para pruebas: permite apuntar el
+  /// almacenamiento a un directorio temporal distinto en cada caso.
+  @visibleForTesting
+  void resetForTesting() {
+    _root = null;
+    _preparing = null;
   }
 
   Future<Directory> _prepare() async {

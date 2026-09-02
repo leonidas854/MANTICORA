@@ -7,6 +7,7 @@
 #         ./setup.sh doctor       -> diagnostico
 #         ./setup.sh clean        -> limpia y restaura el proyecto
 #         ./setup.sh test         -> ejecuta las pruebas
+#         ./setup.sh corpus       -> descarga los documentos de prueba
 #         ./setup.sh build        -> compilar los APK (quedan en dist/)
 #         ./setup.sh run          -> ejecutar en el movil o emulador Android
 #         ./setup.sh run linux    -> ejecutar en el escritorio (sin camara)
@@ -305,6 +306,36 @@ phase_build() {
     "$C_B" "$stamp" "$C_0"
 }
 
+# Documentos reales de dominio publico usados por las pruebas de calidad.
+# No se versionan: pesan y se pueden volver a bajar cuando haga falta.
+phase_corpus() {
+  step "Descargando documentos de prueba"
+  local dir="$PROJECT_DIR/test/corpus"
+  mkdir -p "$dir"
+
+  local base="https://upload.wikimedia.org/wikipedia/commons/thumb"
+  fetch() { # destino  url
+    if [ -s "$dir/$1" ]; then ok "$1 (ya estaba)"; return 0; fi
+    if curl -sL --max-time 90 -o "$dir/$1" "$2" && [ -s "$dir/$1" ]; then
+      ok "$1 ($(du -h "$dir/$1" | cut -f1))"
+    else
+      warn "No se pudo descargar $1"
+      rm -f "$dir/$1"
+    fi
+  }
+
+  fetch factura-sichuan.jpg \
+    "$base/1/12/Common_Printed_Invoice_from_Sichuan.jpg/1280px-Common_Printed_Invoice_from_Sichuan.jpg"
+  fetch factura-1849.jpg \
+    "$base/b/bb/Document%2C_Invoice%2C_Charles_A._Baudo%2C_before_1849_%28CH_18634673%29.jpg/1280px-Document%2C_Invoice%2C_Charles_A._Baudo%2C_before_1849_%28CH_18634673%29.jpg"
+  fetch tabla-sharon-1854.jpg \
+    "$base/6/60/Invoice_and_valuations_of_the_rateable_polls_and_estates_within_the_town_of_Sharon%2C_May_1%2C_1854_%28IA_invoicevaluation00shar%29.pdf/page1-1280px-Invoice_and_valuations_of_the_rateable_polls_and_estates_within_the_town_of_Sharon%2C_May_1%2C_1854_%28IA_invoicevaluation00shar%29.pdf.jpg"
+  fetch instrucciones.jpg \
+    "$base/e/e1/Black_Lunch_Table_DIY_Photo_Booth_Instructions_%28FINAL%29.pdf/page1-960px-Black_Lunch_Table_DIY_Photo_Booth_Instructions_%28FINAL%29.pdf.jpg"
+
+  info "Las pruebas que los usan se saltan solas si faltan."
+}
+
 phase_install() {
   step "Instalando en el dispositivo"
   local device; device="$(android_device)"
@@ -333,10 +364,11 @@ case "${1:-all}" in
   run)       phase_run "$@" ;;
   emulator|emu) phase_emu ;;
   install)   phase_install ;;
+  corpus)    phase_corpus ;;
   apk)       phase_build ;;
   all)       phase_toolchain; phase_project; phase_doctor ;;
   test)      step "Pruebas"; cd "$PROJECT_DIR" && flutter test ;;
-  *) die "Fase desconocida: $1 (usa: toolchain|project|doctor|clean|test|build|run|install|emulator)" ;;
+  *) die "Fase desconocida: $1 (usa: toolchain|project|doctor|clean|test|build|run|install|corpus|emulator)" ;;
 esac
 
 printf "\n%s  Listo. Abre una terminal NUEVA (o: source ~/.zshenv) para tener flutter en el PATH.%s\n" "$C_G" "$C_0"
