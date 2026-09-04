@@ -8,7 +8,6 @@ import '../../core/device_profile.dart';
 import '../../core/error_orchestrator.dart';
 import '../../core/logger.dart';
 import '../../core/validators.dart';
-import '../../imaging/geometry.dart';
 import '../../imaging/pipeline.dart';
 import '../../widgets/common.dart';
 import '../edit/edit_screen.dart';
@@ -118,12 +117,11 @@ Future<bool> _addFromFile(ScanSession session, XFile file) async {
     normalized.jpeg,
     width: normalized.width,
     height: normalized.height,
-    quad: quad ??
-        Quad.inset(
-          normalized.width.toDouble(),
-          normalized.height.toDouble(),
-          0.04,
-        ),
+    quad: initialDocumentQuad(
+      quad,
+      width: normalized.width.toDouble(),
+      height: normalized.height.toDouble(),
+    ),
   );
   return true;
 }

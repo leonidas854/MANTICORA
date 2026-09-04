@@ -97,6 +97,7 @@ class ScanPage {
     int? height,
     String? ocrText,
     String? ocrBoxes,
+    bool clearOcr = false,
   }) =>
       ScanPage(
         id: id,
@@ -111,8 +112,8 @@ class ScanPage {
         rotation: rotation ?? this.rotation,
         width: width ?? this.width,
         height: height ?? this.height,
-        ocrText: ocrText ?? this.ocrText,
-        ocrBoxes: ocrBoxes ?? this.ocrBoxes,
+        ocrText: clearOcr ? null : (ocrText ?? this.ocrText),
+        ocrBoxes: clearOcr ? null : (ocrBoxes ?? this.ocrBoxes),
       );
 
   Map<String, Object?> toMap() => {

@@ -18,6 +18,102 @@ import '../../widgets/common.dart';
 import '../../widgets/quad_overlay.dart';
 import 'scan_session.dart';
 
+/// Encuadre de partida de una captura.
+///
+/// Cuando el detector no encuentra el documento, lo honesto es quedarse con la
+/// hoja entera: recortar un margen "por si acaso" se come bordes, indices y
+/// numeros de pagina sin que nadie lo haya pedido. El usuario siempre puede
+/// ajustar el recorte despues.
+Quad initialDocumentQuad(
+  Quad? detected, {
+  required double width,
+  required double height,
+}) =>
+    detected ?? Quad.full(width, height);
+
+/// Decide cuando el disparo automatico puede capturar.
+///
+/// Ademas de exigir varios fotogramas estables, recuerda la hoja ya fotografiada
+/// para no repetirla: solo vuelve a armarse cuando el documento sale del encuadre
+/// o cuando aparece otro claramente distinto. Sin esta memoria, dejar el movil
+/// apoyado sobre una hoja llenaba la tanda con la misma pagina.
+class AutoCaptureGate {
+  AutoCaptureGate({
+    this.stableFramesRequired = 4,
+    this.cooldown = const Duration(seconds: 2),
+    this.stabilityTolerance = 24,
+    this.sameSheetTolerance = 32,
+  });
+
+  /// Fotogramas seguidos con el mismo encuadre antes de disparar.
+  final int stableFramesRequired;
+
+  /// Tiempo minimo entre dos capturas automaticas.
+  final Duration cooldown;
+
+  /// Movimiento maximo, en pixeles de vista previa, que sigue siendo "quieto".
+  final double stabilityTolerance;
+
+  /// Distancia por debajo de la cual se considera la MISMA hoja ya capturada.
+  final double sameSheetTolerance;
+
+  Quad? _lastSeen;
+  Quad? _captured;
+  DateTime? _capturedAt;
+  int _stableFrames = 0;
+
+  int get stableFrames => _stableFrames;
+
+  /// `true` mientras no haya una hoja ya capturada bloqueando el disparo.
+  bool get armed => _captured == null;
+
+  /// Registra un fotograma y responde si procede disparar.
+  bool observe(Quad? quad, DateTime now) {
+    if (quad == null) {
+      // La hoja salio del encuadre: se rearma para la siguiente.
+      _lastSeen = null;
+      _captured = null;
+      _stableFrames = 0;
+      return false;
+    }
+
+    final steady = _lastSeen != null && _within(_lastSeen!, quad, stabilityTolerance);
+    _stableFrames = steady ? _stableFrames + 1 : 1;
+    _lastSeen = quad;
+
+    if (_stableFrames < stableFramesRequired) return false;
+    if (_captured != null && _within(_captured!, quad, sameSheetTolerance)) {
+      return false;
+    }
+    final last = _capturedAt;
+    if (last != null && now.difference(last) < cooldown) return false;
+    return true;
+  }
+
+  /// Anota la hoja recien capturada para no repetirla.
+  void registerCapture(Quad quad, DateTime now) {
+    _captured = quad;
+    _capturedAt = now;
+    _lastSeen = quad;
+    _stableFrames = 0;
+  }
+
+  /// Olvida todo el estado (al cerrar la camara o vaciar la tanda).
+  void reset() {
+    _lastSeen = null;
+    _captured = null;
+    _capturedAt = null;
+    _stableFrames = 0;
+  }
+
+  static bool _within(Quad a, Quad b, double tolerance) {
+    for (var i = 0; i < 4; i++) {
+      if (a.points[i].distanceTo(b.points[i]) > tolerance) return false;
+    }
+    return true;
+  }
+}
+
 /// Camara con deteccion de bordes en vivo y captura por lotes.
 ///
 /// Devuelve la [ScanSession] con las capturas, o `null` si se cancela.
@@ -44,7 +140,7 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
 
   bool _busy = false;
   bool _autoCapture = false;
-  int _stableFrames = 0;
+  final AutoCaptureGate _gate = AutoCaptureGate();
   FlashMode _flash = FlashMode.off;
   bool _handedOff = false;
 
@@ -225,7 +321,7 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
     final sourceH = preview?.width ?? 0;
 
     final rotated = _rotateForPreview(raw);
-    final stable = rotated != null && _liveQuad != null && _similar(_liveQuad!, rotated);
+    final shouldCapture = _gate.observe(rotated, DateTime.now());
 
     setState(() {
       _liveQuad = rotated;
@@ -234,11 +330,9 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
             ? Size(sourceW, sourceH)
             : Size(sourceH, sourceW);
       }
-      _stableFrames = stable ? _stableFrames + 1 : 0;
     });
 
-    if (_autoCapture && _stableFrames >= 4 && !_busy) {
-      _stableFrames = 0;
+    if (_autoCapture && shouldCapture && !_busy) {
       unawaited(_capture());
     }
   }
@@ -266,13 +360,6 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
     return Quad(pts[0], pts[1], pts[2], pts[3]);
   }
 
-  bool _similar(Quad a, Quad b) {
-    for (var i = 0; i < 4; i++) {
-      if (a.points[i].distanceTo(b.points[i]) > 24) return false;
-    }
-    return true;
-  }
-
   // ------------------------------------------------------------- acciones
 
   Future<void> _capture() async {
@@ -286,6 +373,9 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
       );
       return;
     }
+
+    final framed = _liveQuad;
+    if (framed != null) _gate.registerCapture(framed, DateTime.now());
 
     setState(() => _busy = true);
     try {
@@ -342,12 +432,11 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
           normalized.jpeg,
           width: normalized.width,
           height: normalized.height,
-          quad: quad ??
-              Quad.inset(
-                normalized.width.toDouble(),
-                normalized.height.toDouble(),
-                0.04,
-              ),
+          quad: initialDocumentQuad(
+            quad,
+            width: normalized.width.toDouble(),
+            height: normalized.height.toDouble(),
+          ),
         );
       },
       tag: _tag,
@@ -577,7 +666,12 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
                           ? Theme.of(context).colorScheme.primary
                           : Colors.white,
                     ),
-                    onPressed: () => setState(() => _autoCapture = !_autoCapture),
+                    onPressed: () => setState(() {
+                      _autoCapture = !_autoCapture;
+                      // Al encenderla, la cuenta empieza de cero: asi el pulso
+                      // del dedo no dispara la foto en el mismo instante.
+                      _gate.reset();
+                    }),
                   ),
                 ],
               ],

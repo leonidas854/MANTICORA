@@ -323,6 +323,11 @@ class DocumentRepository {
   ///
   /// Si la insercion en la base falla, se borran las imagenes ya escritas para
   /// no dejar basura ocupando espacio.
+  ///
+  /// Con [keepOriginal] en `false` no se guarda la foto de camara: la base
+  /// editable pasa a ser la imagen YA procesada. Por eso tambien se archiva sin
+  /// recorte, filtro, ajustes ni giro: esos pasos estan horneados en el pixel y
+  /// volver a aplicarlos al reeditar recortaria la pagina por segunda vez.
   Future<ScanPage> addPage({
     required String documentId,
     required Uint8List originalJpeg,
@@ -334,6 +339,7 @@ class DocumentRepository {
     int rotation = 0,
     int width = 0,
     int height = 0,
+    bool keepOriginal = true,
   }) async {
     if (documentId.isEmpty) {
       throw const AppFailure.validation('Falta el documento de destino.');
@@ -348,8 +354,15 @@ class DocumentRepository {
     final thumbRel = _files.relativeForPage(documentId, pageId, 'thumb');
     final written = <String>[];
 
+    // Sin original que conservar, la base editable es la salida procesada y el
+    // estado de edicion debe quedar neutro para no aplicarla dos veces.
+    final baseJpeg = keepOriginal && originalJpeg.isNotEmpty
+        ? originalJpeg
+        : processedJpeg;
+    final baseIsProcessed = !keepOriginal || originalJpeg.isEmpty;
+
     try {
-      await _files.write(origRel, originalJpeg.isEmpty ? processedJpeg : originalJpeg);
+      await _files.write(origRel, baseJpeg);
       written.add(origRel);
       await _files.write(procRel, processedJpeg);
       written.add(procRel);
@@ -369,10 +382,10 @@ class DocumentRepository {
         originalFile: origRel,
         processedFile: procRel,
         thumbFile: thumbRel,
-        quad: quad,
-        filter: filter,
-        adjustments: adjustments,
-        rotation: rotation,
+        quad: baseIsProcessed ? null : quad,
+        filter: baseIsProcessed ? ScanFilter.original : filter,
+        adjustments: baseIsProcessed ? Adjustments.none : adjustments,
+        rotation: baseIsProcessed ? 0 : rotation,
         width: width,
         height: height,
       );
@@ -390,6 +403,12 @@ class DocumentRepository {
   }
 
   /// Sustituye las imagenes procesadas de una pagina (tras reeditarla).
+  ///
+  /// El texto reconocido y sus cajas se descartan: pertenecen a la imagen
+  /// anterior y, si se conservaran, la capa buscable del PDF quedaria desplazada
+  /// y el buscador seguiria encontrando palabras que ya no estan en la pagina.
+  /// Con [keepOcr] en `true` se mantienen (giros de 180 grados, por ejemplo, no
+  /// cambian el contenido, pero por defecto se prefiere lo seguro).
   Future<ScanPage> replacePageImage(
     ScanPage page, {
     required Uint8List processedJpeg,
@@ -400,6 +419,7 @@ class DocumentRepository {
     int? rotation,
     int? width,
     int? height,
+    bool keepOcr = false,
   }) async {
     if (processedJpeg.isEmpty) {
       throw const AppFailure.validation('La imagen procesada esta vacia.');
@@ -416,10 +436,12 @@ class DocumentRepository {
         rotation: rotation,
         width: width,
         height: height,
+        clearOcr: !keepOcr,
       );
       final db = await _db;
       await db.update('pages', updated.toMap(), where: 'id = ?', whereArgs: [page.id]);
       await _touch(page.documentId);
+      if (!keepOcr && page.hasOcr) await _reindexDocument(page.documentId);
       _notify();
       return updated;
     } catch (e, st) {

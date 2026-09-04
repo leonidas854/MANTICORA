@@ -2,7 +2,6 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:share_plus/share_plus.dart';
 
 import '../../core/error_orchestrator.dart';
 import '../../core/providers.dart';
@@ -170,7 +169,7 @@ class _PageViewerScreenState extends ConsumerState<PageViewerScreen> {
       return;
     }
     if (!mounted) return;
-    await runWithProgress<void>(context, 'Aplicando cambios...', (_) async {
+    await runWithProgress<void>(context, 'Aplicando cambios...', (setMessage) async {
       final result = await ImagePipeline.processPage(
         sourceJpeg: await original.readAsBytes(),
         quad: quad ?? page.quad,
@@ -178,7 +177,7 @@ class _PageViewerScreenState extends ConsumerState<PageViewerScreen> {
         adjustments: page.adjustments,
         rotationQuarterTurns: rotation ?? page.rotation,
       );
-      await repo.replacePageImage(
+      final updated = await repo.replacePageImage(
         page,
         processedJpeg: result.jpeg,
         thumbnailJpeg: result.thumbnail,
@@ -188,6 +187,26 @@ class _PageViewerScreenState extends ConsumerState<PageViewerScreen> {
         width: result.width,
         height: result.height,
       );
+
+      // El texto reconocido correspondia a la imagen anterior y se ha
+      // descartado; si la pagina lo tenia, se rehace para no perder ni la
+      // busqueda ni la capa de texto del PDF.
+      if (page.hasOcr) {
+        setMessage('Rehaciendo el texto reconocido...');
+        await ErrorOrchestrator.guard(
+          'Rehaciendo el OCR de la pagina',
+          () async {
+            final file = await repo.pageFile(updated);
+            final ocr = await OcrService.instance.recognizeFile(file.path);
+            if (!ocr.isEmpty) {
+              await repo.setOcrText(updated.id, updated.documentId, ocr.text,
+                  boxesJson: ocr.boxesJson);
+            }
+          },
+          tag: 'Pagina',
+          notifyUser: false,
+        );
+      }
     });
   }
 
@@ -271,12 +290,7 @@ class _PageViewerScreenState extends ConsumerState<PageViewerScreen> {
               actions: [
                 IconButton(
                   icon: const Icon(Icons.share_outlined),
-                  onPressed: () => ErrorOrchestrator.guard(
-                    'Compartiendo el texto',
-                    () => SharePlus.instance
-                        .share(ShareParams(text: result.text)),
-                    tag: 'Pagina',
-                  ),
+                  onPressed: () => shareText(ctx, result.text),
                 ),
               ],
             ),
@@ -294,17 +308,19 @@ class _PageViewerScreenState extends ConsumerState<PageViewerScreen> {
   }
 
   Future<void> _share(ScanPage page) async {
-    await ErrorOrchestrator.guard(
-      'Compartiendo la pagina',
+    final file = await ErrorOrchestrator.guard<File>(
+      'Preparando la pagina',
       () async {
         final file = await ref.read(repositoryProvider).pageFile(page);
         if (!await file.exists()) {
           throw const AppFailure.notFound('La imagen de esta pagina ya no esta.');
         }
-        await SharePlus.instance.share(ShareParams(files: [XFile(file.path)]));
+        return file;
       },
       tag: 'Pagina',
     );
+    if (file == null || !mounted) return;
+    await shareFiles(context, [file]);
   }
 
   Future<void> _delete(ScanPage page) async {

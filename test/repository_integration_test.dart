@@ -6,6 +6,8 @@ import 'package:manticora/core/failure.dart';
 import 'package:manticora/data/db/app_database.dart';
 import 'package:manticora/data/repositories/document_repository.dart';
 import 'package:manticora/data/repositories/storage_service.dart';
+import 'package:manticora/imaging/filters.dart';
+import 'package:manticora/imaging/geometry.dart';
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
@@ -111,6 +113,71 @@ void main() {
       expect(doc!.pages, hasLength(2));
       expect(doc.pages.map((p) => p.position), [0, 1]);
       expect(await file.exists(), isFalse, reason: 'el fichero deberia borrarse');
+    });
+
+    test('reeditar una pagina invalida el OCR, sus cajas y el indice de busqueda',
+        () async {
+      final id = await makeDocument(title: 'Documento neutro');
+      var page = (await repo.getDocument(id))!.pages.single;
+      await repo.setOcrText(
+        page.id,
+        id,
+        'palabraunica reconocida antes de editar',
+        boxesJson: '[{"t":"palabraunica","x":1,"y":2,"w":3,"h":4}]',
+      );
+      page = (await repo.getDocument(id))!.pages.single;
+      expect(await repo.listDocuments(query: 'palabraunica'), hasLength(1));
+
+      await repo.replacePageImage(
+        page,
+        processedJpeg: _fakeJpeg(700),
+        thumbnailJpeg: _fakeJpeg(140),
+        filter: ScanFilter.grayscale,
+      );
+
+      final refreshed = (await repo.getDocument(id))!;
+      expect(refreshed.pages.single.ocrText, isNull);
+      expect(refreshed.pages.single.ocrBoxes, isNull);
+      expect(refreshed.combinedText, isEmpty);
+      expect(await repo.listDocuments(query: 'palabraunica'), isEmpty,
+          reason: 'el FTS no debe conservar texto de una imagen anterior');
+    });
+
+    test('sin conservar original guarda una base neutra para no recortar dos veces',
+        () async {
+      final doc = await repo.createDocument(title: 'Sin originales');
+      final original = _fakeJpeg(600);
+      final processed = _fakeJpeg(900);
+
+      final page = await repo.addPage(
+        documentId: doc.id,
+        originalJpeg: original,
+        processedJpeg: processed,
+        thumbnailJpeg: _fakeJpeg(120),
+        quad: Quad.inset(800, 1100, 0.10),
+        filter: ScanFilter.blackWhite,
+        adjustments: const Adjustments(brightness: 0.2, contrast: 0.3),
+        rotation: 1,
+        width: 640,
+        height: 880,
+        keepOriginal: false,
+      );
+
+      final storedOriginal = await repo.absoluteFile(page.originalFile);
+      expect(await storedOriginal.readAsBytes(), processed,
+          reason: 'la base editable debe ser exactamente la salida ya procesada');
+      expect(page.quad, isNull,
+          reason: 'volver a aplicar el quad recortaria por segunda vez');
+      expect(page.filter, ScanFilter.original,
+          reason: 'el filtro ya esta horneado en la base editable');
+      expect(page.adjustments.isIdentity, isTrue);
+      expect(page.rotation, 0, reason: 'el giro ya esta horneado en la imagen');
+
+      final persisted = (await repo.getDocument(doc.id))!.pages.single;
+      expect(persisted.quad, isNull);
+      expect(persisted.filter, ScanFilter.original);
+      expect(persisted.adjustments.isIdentity, isTrue);
+      expect(persisted.rotation, 0);
     });
   });
 

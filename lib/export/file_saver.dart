@@ -12,12 +12,19 @@ import '../core/logger.dart';
 class FileSaver {
   static const _mimeTypes = {
     'pdf': 'application/pdf',
-    'docx':
-        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     'txt': 'text/plain',
     'jpg': 'image/jpeg',
     'jpeg': 'image/jpeg',
     'png': 'image/png',
+    'm4a': 'audio/mp4',
+    'aac': 'audio/aac',
+    'mp3': 'audio/mpeg',
+    'ogg': 'audio/ogg',
+    'opus': 'audio/ogg',
+    'wav': 'audio/wav',
+    'mp4': 'video/mp4',
+    'webm': 'video/webm',
     'zip': 'application/zip',
   };
 
@@ -41,7 +48,7 @@ class FileSaver {
       if (uri != null) Log.i('Guardado', 'Fichero guardado en $uri');
       return uri?.toString();
     } catch (e, st) {
-      throw AppFailure.from(e, st, 'Guardando \$fileName');
+      throw AppFailure.from(e, st, 'Guardando $fileName');
     }
   }
 }

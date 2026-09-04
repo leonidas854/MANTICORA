@@ -284,7 +284,8 @@ class _EditScreenState extends ConsumerState<EditScreen> {
                 );
                 return repo.addPage(
                   documentId: docId,
-                  originalJpeg: settings.keepOriginals ? original : processed.jpeg,
+                  originalJpeg: original,
+                  keepOriginal: settings.keepOriginals,
                   processedJpeg: processed.jpeg,
                   thumbnailJpeg: processed.thumbnail,
                   quad: shot.quad,

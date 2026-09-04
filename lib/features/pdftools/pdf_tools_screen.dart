@@ -5,7 +5,6 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
-import 'package:share_plus/share_plus.dart';
 
 import '../../core/error_orchestrator.dart';
 import '../../core/failure.dart';
@@ -185,14 +184,9 @@ class _PdfToolsScreenState extends ConsumerState<PdfToolsScreen> {
             ListTile(
               leading: const Icon(Icons.share_outlined),
               title: const Text('Compartir'),
-              onTap: () {
+              onTap: () async {
                 Navigator.pop(ctx);
-                ErrorOrchestrator.guard(
-                  'Compartiendo el fichero',
-                  () => SharePlus.instance
-                      .share(ShareParams(files: [XFile(file.path)])),
-                  tag: _tag,
-                );
+                if (mounted) await shareFiles(context, [file]);
               },
             ),
             ListTile(
@@ -537,13 +531,14 @@ class _PdfToolsScreenState extends ConsumerState<PdfToolsScreen> {
 
     final dir = await StorageService.instance.exportsDir;
     final base = p.basenameWithoutExtension(file.name);
-    final out = <XFile>[];
+    final out = <File>[];
     for (var i = 0; i < rasters.length; i++) {
       final f = File(p.join(dir.path, '$base-${'${i + 1}'.padLeft(3, '0')}.jpg'));
       await f.writeAsBytes(rasters[i].jpeg, flush: true);
-      out.add(XFile(f.path));
+      out.add(f);
     }
-    await SharePlus.instance.share(ShareParams(files: out, subject: base));
+    if (!mounted) return;
+    await shareFiles(context, out, subject: base, bundleName: '$base.zip');
   }
 
   Future<void> _imagesToPdf() async {

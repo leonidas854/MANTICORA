@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:share_plus/share_plus.dart';
 
 import '../../core/device_profile.dart';
 import '../../core/error_orchestrator.dart';
@@ -182,13 +181,8 @@ class _DiagnosticsScreenState extends ConsumerState<DiagnosticsScreen> {
       if (mounted) showMessage(context, 'No hay registro en disco que compartir');
       return;
     }
-    await ErrorOrchestrator.guard(
-      'Compartiendo el registro',
-      () => SharePlus.instance.share(
-        ShareParams(files: [XFile(file.path)], subject: 'Registro de Manticora'),
-      ),
-      tag: 'Diagnostico',
-    );
+    if (!mounted) return;
+    await shareFiles(context, [file], subject: 'Registro de Manticora');
   }
 
   Future<void> _clearLog() async {

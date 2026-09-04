@@ -3,7 +3,6 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:printing/printing.dart';
-import 'package:share_plus/share_plus.dart';
 
 import '../../core/device_profile.dart';
 import '../../core/error_orchestrator.dart';
@@ -627,15 +626,11 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
       (_) => ExportService.instance.toImages(doc),
     );
     if (files == null || files.isEmpty || !mounted) return;
-    await ErrorOrchestrator.guard(
-      'Compartiendo las imagenes',
-      () => SharePlus.instance.share(
-        ShareParams(
-          files: files.map((f) => XFile(f.path)).toList(),
-          subject: doc.document.title,
-        ),
-      ),
-      tag: 'Exportacion',
+    await shareFiles(
+      context,
+      files,
+      subject: doc.document.title,
+      bundleName: ExportService.safeName(doc.document.title, 'zip'),
     );
   }
 
@@ -655,13 +650,7 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
     );
     if (result == null || !mounted) return;
     _warnIfPartial(result);
-    await ErrorOrchestrator.guard(
-      'Compartiendo el PDF',
-      () => SharePlus.instance.share(
-        ShareParams(files: [XFile(result.file.path)], subject: doc.document.title),
-      ),
-      tag: 'Exportacion',
-    );
+    await shareFiles(context, [result.file], subject: doc.document.title);
   }
 
   Future<void> _print(DocumentWithPages doc) async {
@@ -706,14 +695,9 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
             ListTile(
               leading: const Icon(Icons.share_outlined),
               title: const Text('Compartir'),
-              onTap: () {
+              onTap: () async {
                 Navigator.pop(ctx);
-                ErrorOrchestrator.guard(
-                  'Compartiendo el fichero',
-                  () => SharePlus.instance
-                      .share(ShareParams(files: [XFile(file.path)])),
-                  tag: 'Exportacion',
-                );
+                if (mounted) await shareFiles(context, [file]);
               },
             ),
             ListTile(

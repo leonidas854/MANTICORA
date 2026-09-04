@@ -1,10 +1,15 @@
 import 'dart:async';
+import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../core/error_orchestrator.dart';
 import '../core/failure.dart';
 import '../core/logger.dart';
+import '../export/share_service.dart';
 
 /// Ejecuta una tarea larga mostrando un dialogo de progreso.
 ///
@@ -156,6 +161,91 @@ Future<String?> promptText(
   controller.dispose();
   final trimmed = result?.trim();
   return (trimmed == null || trimmed.isEmpty) ? null : trimmed;
+}
+
+/// Entrega ficheros al sistema y cuenta lo que ha pasado.
+///
+/// Es el unico camino que deben usar las pantallas: decide por plataforma
+/// (panel de compartir en movil, guardar o empaquetar en escritorio) y avisa
+/// con un mensaje que corresponde a lo que realmente ha ocurrido, en vez de
+/// dar por hecho que se abrio un panel que en Linux no existe.
+Future<void> shareFiles(
+  BuildContext context,
+  List<File> files, {
+  String? subject,
+  String? text,
+  String? bundleName,
+}) async {
+  if (files.isEmpty) {
+    showMessage(context, 'No hay nada que compartir', error: true);
+    return;
+  }
+
+  // iPad y macOS necesitan saber desde donde sale el panel; en el resto de
+  // plataformas se ignora sin efecto alguno.
+  final box = context.findRenderObject() as RenderBox?;
+  final origin = box != null && box.hasSize
+      ? box.localToGlobal(Offset.zero) & box.size
+      : null;
+
+  final result = await ErrorOrchestrator.guard<FileDeliveryResult>(
+    'Compartiendo archivos',
+    () => ShareService.deliverFiles(
+      files: files.map((f) => XFile(f.path)).toList(),
+      subject: subject,
+      text: text,
+      bundleName: bundleName ?? 'manticora-${files.length}-archivos.zip',
+      sharePositionOrigin: origin,
+    ),
+    tag: 'Compartir',
+  );
+  if (result == null || !context.mounted) return;
+
+  switch (result.strategy) {
+    case FileDeliveryStrategy.platformShare:
+      break;
+    case FileDeliveryStrategy.saveAs:
+      showMessage(
+        context,
+        result.wasCancelled ? 'Guardado cancelado' : 'Guardado correctamente',
+      );
+    case FileDeliveryStrategy.bundleAndSave:
+      showMessage(
+        context,
+        result.wasCancelled
+            ? 'Guardado cancelado'
+            : 'Los ${files.length} archivos se han guardado en un ZIP',
+      );
+  }
+}
+
+/// Comparte texto suelto (sin fichero adjunto).
+///
+/// El escritorio Linux no tiene panel de compartir, asi que alli el texto va al
+/// portapapeles: es lo mas parecido a "compartir" que ofrece el sistema y evita
+/// un error incomprensible.
+Future<void> shareText(
+  BuildContext context,
+  String text, {
+  String? subject,
+}) async {
+  final value = text.trim();
+  if (value.isEmpty) {
+    showMessage(context, 'No hay texto que compartir', error: true);
+    return;
+  }
+
+  if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
+    await Clipboard.setData(ClipboardData(text: value));
+    if (context.mounted) showMessage(context, 'Texto copiado al portapapeles');
+    return;
+  }
+
+  await ErrorOrchestrator.guard(
+    'Compartiendo el texto',
+    () => SharePlus.instance.share(ShareParams(text: value, subject: subject)),
+    tag: 'Compartir',
+  );
 }
 
 void showMessage(BuildContext context, String message, {bool error = false}) {
