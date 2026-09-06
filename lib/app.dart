@@ -77,9 +77,10 @@ class _ManticoraAppState extends ConsumerState<ManticoraApp>
       builder: (context, child) {
         ErrorWidget.builder = (details) => _FriendlyErrorWidget(details: details);
         return MediaQuery.withClampedTextScaling(
-          // Evita que una escala de texto enorme rompa las rejillas.
+          // Se respeta el tamano de letra del sistema hasta el doble, que es lo
+          // que necesita quien ve poco. Mas alla las rejillas dejan de caber.
           minScaleFactor: 0.8,
-          maxScaleFactor: 1.4,
+          maxScaleFactor: 2,
           child: child ?? const SizedBox.shrink(),
         );
       },

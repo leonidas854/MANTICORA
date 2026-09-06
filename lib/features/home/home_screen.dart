@@ -4,12 +4,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
+import '../../core/device_layout.dart';
 import '../../core/device_profile.dart';
 import '../../core/error_orchestrator.dart';
 import '../../core/providers.dart';
 import '../../core/settings.dart';
 import '../../data/models/models.dart';
 import '../../widgets/common.dart';
+import '../media/media_screen.dart';
 import '../pdftools/pdf_tools_screen.dart';
 import '../settings/settings_screen.dart';
 import '../viewer/document_screen.dart';
@@ -132,6 +134,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             child: ListTile(
               leading: Icon(Icons.picture_as_pdf_outlined),
               title: Text('Herramientas PDF'),
+            ),
+          ),
+          const PopupMenuItem(
+            value: 'media',
+            child: ListTile(
+              leading: Icon(Icons.headphones_outlined),
+              title: Text('Convertir a audio o video'),
             ),
           ),
           const PopupMenuItem(
@@ -321,11 +330,36 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     },
   );
 
-  Widget _fab() => FloatingActionButton.extended(
-    onPressed: () => startScan(context, ref),
-    icon: const Icon(Icons.camera_alt_outlined),
-    label: const Text('Escanear'),
-  );
+  /// En el movil lo primero es la camara; en el escritorio, donde muchas veces
+  /// no hay ninguna, lo primero es traer ficheros que ya estan en el disco.
+  Widget _fab() {
+    void scan() => startScan(context, ref);
+    if (DeviceLayout.kindOf(context) != AppDeviceKind.desktop) {
+      return FloatingActionButton.extended(
+        onPressed: scan,
+        icon: const Icon(Icons.camera_alt_outlined),
+        label: const Text('Escanear'),
+      );
+    }
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        FloatingActionButton.small(
+          heroTag: 'camara',
+          tooltip: 'Escanear con la camara',
+          onPressed: scan,
+          child: const Icon(Icons.camera_alt_outlined),
+        ),
+        const SizedBox(width: 12),
+        FloatingActionButton.extended(
+          heroTag: 'importar',
+          onPressed: () => importImages(context, ref),
+          icon: const Icon(Icons.file_upload_outlined),
+          label: const Text('Importar'),
+        ),
+      ],
+    );
+  }
 
   // ------------------------------------------------------------ acciones
 
@@ -348,6 +382,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         Navigator.push(
           context,
           MaterialPageRoute(builder: (_) => const PdfToolsScreen()),
+        );
+      case 'media':
+        Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const MediaScreen()),
         );
       case 'folder':
         final name = await promptText(

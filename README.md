@@ -69,21 +69,36 @@ Se generan tres:
 
 ### Ejecutar en el escritorio
 
-`./setup.sh run linux` levanta la app en Linux, que es mucho más rápido para
-iterar en la interfaz. Ahí **no hay cámara ni OCR** (son plugins de móvil): la
-pantalla de escaneo lo detecta y ofrece importar desde la galería, de modo que
-el resto del flujo —recorte, filtros, PDF, Word— se puede probar igual. La base
-de datos usa el motor FFI de SQLite, que se activa solo en escritorio.
+`./setup.sh run linux` levanta la app en Linux. Ahí **no hay cámara ni OCR** (son
+plugins de móvil): la app lo tiene en cuenta —el botón principal pasa a ser
+*Importar*, y la pantalla de escaneo ofrece traer imágenes del disco—, así que el
+resto del flujo —recorte, filtros, PDF, Word, audio y vídeo— funciona igual. La
+base de datos usa el motor FFI de SQLite, que se activa solo en escritorio.
+
+Dos detalles propios del escritorio:
+
+- **Compartir**: Linux no tiene panel de compartir con adjuntos, así que un
+  fichero se guarda con el selector del sistema y varios se empaquetan antes en
+  un ZIP. En Android sale el panel de siempre, con WhatsApp incluido.
+- **Audio y vídeo**: en el móvil se usan el motor de voz del teléfono y FFmpegKit;
+  en Linux hacen falta `ffmpeg` y `espeak-ng` instalados en el sistema
+  (`sudo pacman -S ffmpeg espeak-ng`). Si faltan, la app lo dice con ese mismo
+  mensaje en vez de fallar sin explicación.
 
 ### Estado verificado
 
 ```
 flutter analyze   ->  No issues found
-flutter test      ->  110 pruebas, todas pasan
+flutter test      ->  267 pruebas, todas pasan
 flutter doctor    ->  No issues found
 APK release       ->  arm64 37 MB · arm32 32 MB · universal 101 MB
 Arranque en Linux ->  sin errores en el registro
 ```
+
+Entre esas pruebas hay tres conversiones **reales** de extremo a extremo (Word a
+M4A y PowerPoint a MP4, con voz de `espeak-ng` y codificación de FFmpeg, luego
+comprobadas con `ffprobe`). Si el equipo no tiene esas herramientas, esas tres
+se saltan diciendo cuál falta.
 
 El release va minificado con R8 (`isMinifyEnabled`, `isShrinkResources`) y
 reglas propias en `android/app/proguard-rules.pro`. Está firmado con la clave de
@@ -117,6 +132,20 @@ generar un keystore propio**.
   lo hace buscable y seleccionable.
 - **Word (.docx)** generando OOXML real: texto, imágenes o ambos.
 - Texto plano, imágenes sueltas, impresión y compartir.
+
+**Convertir a audio o vídeo** (menú principal, o menú del documento)
+- Entrada: un documento escaneado, un **PDF**, un **Word (.docx)** o unas
+  **diapositivas (.pptx)**. El formato se reconoce por el contenido, no por la
+  extensión.
+- **Audio M4A** en AAC mono a 32 kbit/s: ligero de sobra para mandarlo por
+  WhatsApp.
+- **Vídeo MP4** con una imagen por página —las páginas de Word y PowerPoint se
+  dibujan como láminas legibles—, narrado con voz o mudo con los segundos por
+  página que elijas.
+- Si al documento escaneado le falta el OCR, se reconoce antes de narrarlo y
+  queda guardado. Un PDF escaneado (sin texto interno) se rasteriza y se
+  reconoce igual.
+- Todo ocurre en el aparato: la voz es la del sistema y la mezcla es de FFmpeg.
 
 **Herramientas PDF** (sobre ficheros que ya tengas)
 - Unir, dividir, extraer páginas, eliminar páginas, reordenar, girar.

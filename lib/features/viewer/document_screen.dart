@@ -17,6 +17,7 @@ import '../../export/pdf_tools.dart';
 import '../../imaging/ocr_service.dart';
 import '../../widgets/common.dart';
 import '../home/scan_flow.dart';
+import '../media/media_screen.dart';
 import 'page_viewer.dart';
 
 class DocumentScreen extends ConsumerStatefulWidget {
@@ -91,6 +92,8 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
                 PopupMenuItem(value: 'text', child: Text('Ver texto reconocido')),
                 PopupMenuItem(value: 'print', child: Text('Imprimir')),
                 PopupMenuItem(value: 'images', child: Text('Exportar imagenes')),
+                PopupMenuItem(
+                    value: 'media', child: Text('Convertir a audio o video')),
                 PopupMenuItem(value: 'delete', child: Text('Mover a la papelera')),
               ],
             ),
@@ -311,6 +314,11 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
         await _print(doc);
       case 'images':
         await _exportImages(doc);
+      case 'media':
+        await Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => MediaScreen(document: doc)),
+        );
       case 'delete':
         if (await confirm(context,
             title: 'Mover a la papelera',

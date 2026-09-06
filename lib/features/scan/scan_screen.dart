@@ -701,30 +701,19 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
                 padding: const EdgeInsets.only(bottom: 14),
                 child: SizedBox(
                   height: 58,
-                  child: ListView.separated(
-                    scrollDirection: Axis.horizontal,
-                    reverse: true,
-                    itemCount: shots.length,
-                    separatorBuilder: (_, _) => const SizedBox(width: 8),
-                    itemBuilder: (context, i) {
-                      final shot = shots[shots.length - 1 - i];
-                      return ClipRRect(
-                        borderRadius: BorderRadius.circular(8),
-                        child: Image.file(
-                          shot.file,
-                          width: 44,
-                          height: 58,
-                          fit: BoxFit.cover,
-                          cacheWidth: 96,
-                          gaplessPlayback: true,
-                          errorBuilder: (_, _, _) => const SizedBox(
-                            width: 44,
-                            height: 58,
-                            child: ColoredBox(color: Colors.white12),
-                          ),
-                        ),
-                      );
-                    },
+                  child: Row(
+                    children: [
+                      // Descartar la ultima captura estaba escondido en una
+                      // pulsacion larga sobre el disparador: se borraba una
+                      // foto sin que nada lo anunciara.
+                      IconButton.filledTonal(
+                        tooltip: 'Descartar la ultima captura',
+                        onPressed: _busy ? null : _removeLast,
+                        icon: const Icon(Icons.undo),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(child: _thumbnails(shots)),
+                    ],
                   ),
                 ),
               ),
@@ -738,7 +727,6 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
                 ),
                 GestureDetector(
                   onTap: (_busy || _controller == null) ? null : _capture,
-                  onLongPress: shots.isEmpty ? null : _removeLast,
                   child: Opacity(
                     opacity: _controller == null ? 0.4 : 1,
                     child: Container(
@@ -773,6 +761,32 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
       ),
     );
   }
+
+  Widget _thumbnails(List<CapturedShot> shots) => ListView.separated(
+    scrollDirection: Axis.horizontal,
+    reverse: true,
+    itemCount: shots.length,
+    separatorBuilder: (_, _) => const SizedBox(width: 8),
+    itemBuilder: (context, i) {
+      final shot = shots[shots.length - 1 - i];
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: Image.file(
+          shot.file,
+          width: 44,
+          height: 58,
+          fit: BoxFit.cover,
+          cacheWidth: 96,
+          gaplessPlayback: true,
+          errorBuilder: (_, _, _) => const SizedBox(
+            width: 44,
+            height: 58,
+            child: ColoredBox(color: Colors.white12),
+          ),
+        ),
+      );
+    },
+  );
 }
 
 /// Borrado tolerante: el temporal que deja el plugin ya no hace falta y su

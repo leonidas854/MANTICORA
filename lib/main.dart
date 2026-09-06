@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 
 import 'app.dart';
+import 'core/device_layout.dart';
 import 'core/device_profile.dart';
 import 'core/error_orchestrator.dart';
 import 'core/logger.dart';
@@ -25,6 +26,20 @@ void main() {
 
     runApp(const ProviderScope(child: ManticoraApp()));
   });
+}
+
+/// Telefono de mano: movil, y ademas con pantalla pequena.
+///
+/// Una tablet Android tiene el mismo sistema pero espacio de sobra, asi que se
+/// clasifica por el lado corto en pixeles logicos igual que hace [DeviceLayout].
+bool _isHandheld() {
+  if (!(Platform.isAndroid || Platform.isIOS)) return false;
+  final views = WidgetsBinding.instance.platformDispatcher.views;
+  if (views.isEmpty) return true;
+  final view = views.first;
+  final ratio = view.devicePixelRatio <= 0 ? 1.0 : view.devicePixelRatio;
+  final size = view.physicalSize / ratio;
+  return size.shortestSide < DeviceLayout.tabletShortestSide;
 }
 
 Future<void> _bootstrap() async {
@@ -68,13 +83,17 @@ Future<void> _bootstrap() async {
     tag: 'Arranque',
   );
 
-  // 4. Orientacion. En tablets antiguas puede fallar; no es critico.
+  // 4. Orientacion. Solo se fija en telefonos: en tablet y escritorio girar la
+  // pantalla o redimensionar la ventana es lo normal, y bloquearlo estorba.
   await ErrorOrchestrator.guard(
     'Fijando la orientacion',
-    () => SystemChrome.setPreferredOrientations([
-      DeviceOrientation.portraitUp,
-      DeviceOrientation.portraitDown,
-    ]),
+    () async {
+      if (!_isHandheld()) return;
+      await SystemChrome.setPreferredOrientations([
+        DeviceOrientation.portraitUp,
+        DeviceOrientation.portraitDown,
+      ]);
+    },
     tag: 'Arranque',
     notifyUser: false,
   );
