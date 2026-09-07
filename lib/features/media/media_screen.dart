@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path/path.dart' as p;
 
 import '../../core/error_orchestrator.dart';
 import '../../core/providers.dart';
@@ -293,7 +294,7 @@ class _MediaScreenState extends ConsumerState<MediaScreen> {
                   ? Icons.headphones
                   : Icons.movie,
             ),
-            title: Text(result.file.path.split(Platform.pathSeparator).last),
+            title: Text(p.basename(result.file.path)),
             subtitle: Text(
               '${formatBytes(size)} · '
               '${minutes > 0 ? '$minutes min ' : ''}$seconds s'
@@ -335,7 +336,7 @@ class _MediaScreenState extends ConsumerState<MediaScreen> {
     final saved = await ErrorOrchestrator.guard<String?>(
       'Guardando el archivo',
       () async => FileSaver.save(
-        file.path.split(Platform.pathSeparator).last,
+        p.basename(file.path),
         await file.readAsBytes(),
       ),
       tag: _tag,

@@ -127,6 +127,7 @@ class ExportService {
             imageWidth: w,
             imageHeight: h,
             ocrLines: lines,
+            plainText: page.ocrText ?? '',
           );
         },
         tag: _tag,

@@ -47,11 +47,17 @@ class PdfPageInput {
   final int imageWidth, imageHeight;
   final List<OcrLine> ocrLines;
 
+  /// Texto reconocido sin coordenadas. Se usa solo cuando no hay cajas: es
+  /// preferible un PDF donde se pueda buscar aunque el texto no este colocado
+  /// palabra por palabra, a un PDF en el que no se pueda buscar nada.
+  final String plainText;
+
   const PdfPageInput({
     required this.jpeg,
     required this.imageWidth,
     required this.imageHeight,
     this.ocrLines = const [],
+    this.plainText = '',
   });
 }
 
@@ -140,6 +146,10 @@ class PdfBuilder {
 
             if (searchableText && input.ocrLines.isNotEmpty) {
               children.addAll(_textLayer(input.ocrLines, scale, offX, offY, drawW, drawH));
+            } else if (searchableText && input.plainText.trim().isNotEmpty) {
+              children.add(
+                _plainTextLayer(input.plainText, offX, offY, drawW, drawH),
+              );
             }
 
             if (watermark != null && watermark.trim().isNotEmpty) {
@@ -236,6 +246,34 @@ class PdfBuilder {
     return out;
   }
 
+  /// Capa invisible para el texto sin coordenadas: un bloque que ocupa la
+  /// pagina. No sirve para seleccionar palabra a palabra, pero deja el
+  /// documento buscable, que es lo que se espera de un PDF escaneado.
+  static pw.Widget _plainTextLayer(
+    String text,
+    double offX,
+    double offY,
+    double drawW,
+    double drawH,
+  ) {
+    return pw.Positioned(
+      left: offX,
+      top: offY,
+      child: pw.Opacity(
+        opacity: 0,
+        child: pw.SizedBox(
+          width: drawW,
+          height: drawH,
+          child: pw.Text(
+            _sanitize(text),
+            style: const pw.TextStyle(fontSize: 8),
+            overflow: pw.TextOverflow.clip,
+          ),
+        ),
+      ),
+    );
+  }
+
   static PdfPageFormat _formatFor(PdfPageSize size, double imgW, double imgH, double margin) {
     final base = size.format;
     if (base == null) {
@@ -256,10 +294,51 @@ class PdfBuilder {
 
   /// Las fuentes estandar del PDF cubren Latin-1; sustituimos lo que no entra
   /// para que nunca falle la generacion por un glifo raro del OCR.
+  /// Adapta el texto a lo que sabe escribir la fuente estandar del PDF.
+  ///
+  /// Las fuentes base de un PDF (Helvetica y companeras) solo cubren Latin-1,
+  /// que incluye las tildes y la enye del espanol. Lo que queda fuera son sobre
+  /// todo signos tipograficos —comillas curvas, guiones largos, puntos
+  /// suspensivos, el simbolo del euro— que aparecen constantemente en
+  /// documentos reales: sustituirlos por su equivalente de toda la vida deja el
+  /// texto buscable, mientras que dejarlos como "?" rompe la busqueda.
   static String _sanitize(String s) {
+    const equivalences = <int, String>{
+      0x2018: "'", // ‘
+      0x2019: "'", // ’
+      0x201A: "'",
+      0x201B: "'",
+      0x201C: '"', // “
+      0x201D: '"', // ”
+      0x201E: '"',
+      0x2010: '-', // ‐
+      0x2011: '-',
+      0x2012: '-',
+      0x2013: '-', // –
+      0x2014: '-', // —
+      0x2015: '-',
+      0x2026: '...', // …
+      0x2022: '-', // •
+      0x00A0: ' ', // espacio duro
+      0x202F: ' ',
+      0x2007: ' ',
+      0x2009: ' ',
+      0x20AC: 'EUR', // €
+      0x2122: 'TM', // ™
+      0x2212: '-', // menos matematico
+      0x00AD: '', // guion blando
+    };
+
     final buf = StringBuffer();
     for (final r in s.runes) {
-      buf.writeCharCode(r <= 0xFF ? r : 0x3F);
+      final replacement = equivalences[r];
+      if (replacement != null) {
+        buf.write(replacement);
+      } else if (r <= 0xFF) {
+        buf.writeCharCode(r);
+      } else {
+        buf.writeCharCode(0x3F); // ?
+      }
     }
     return buf.toString();
   }

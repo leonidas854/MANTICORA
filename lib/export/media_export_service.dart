@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_kit.dart';
+import 'package:flutter/services.dart' show MissingPluginException;
 import 'package:ffmpeg_kit_flutter_new_min/return_code.dart';
 import 'package:path/path.dart' as p;
 import 'package:uuid/uuid.dart';
@@ -333,35 +334,74 @@ class MediaExportService {
   String _concatEscape(String value) =>
       value.replaceAll(r'\', r'\\').replaceAll("'", r"'\''");
 
+  /// Ejecuta FFmpeg con el motor que corresponda a la plataforma.
+  ///
+  /// Android y Windows llevan FFmpeg empaquetado con el plugin, asi que no hay
+  /// nada que instalar. Linux no lo empaqueta y usa el `ffmpeg` del sistema. Si
+  /// el motor empaquetado no esta disponible en un escritorio (por ejemplo
+  /// porque la compilacion no pudo descargar sus binarios), se recurre al
+  /// `ffmpeg` del sistema antes de darse por vencido.
   Future<void> _runOrThrow(
     List<String> arguments, {
     required String operation,
   }) async {
-    if (Platform.isLinux) {
-      try {
-        final result = await Process.run('ffmpeg', arguments)
-            .timeout(const Duration(minutes: 12));
-        if (result.exitCode == 0) return;
-        final detail = '${result.stderr}'.trim();
-        throw AppFailure(
-          kind: FailureKind.document,
-          message: 'No se ha podido terminar la conversion multimedia.',
-          context: operation,
-          cause: detail.length > 1200 ? detail.substring(detail.length - 1200) : detail,
-        );
-      } on ProcessException catch (e, st) {
+    if (Platform.isLinux) return _runSystemFfmpeg(arguments, operation: operation);
+
+    try {
+      await _runBundledFfmpeg(arguments, operation: operation);
+    } on MissingPluginException catch (e) {
+      if (!_isDesktop) {
         throw AppFailure(
           kind: FailureKind.unsupported,
-          message: 'Falta FFmpeg en este escritorio. Instala el paquete '
-              '"ffmpeg" para crear audio y video.',
+          message: 'Esta version no incluye el codificador multimedia.',
           context: operation,
           cause: e,
-          stackTrace: st,
           retryable: false,
         );
       }
+      Log.w(_tag, 'FFmpeg empaquetado no disponible; se usa el del sistema', e);
+      await _runSystemFfmpeg(arguments, operation: operation);
     }
+  }
 
+  bool get _isDesktop =>
+      Platform.isLinux || Platform.isWindows || Platform.isMacOS;
+
+  Future<void> _runSystemFfmpeg(
+    List<String> arguments, {
+    required String operation,
+  }) async {
+    try {
+      final result = await Process.run('ffmpeg', arguments)
+          .timeout(const Duration(minutes: 12));
+      if (result.exitCode == 0) return;
+      final detail = '${result.stderr}'.trim();
+      throw AppFailure(
+        kind: FailureKind.document,
+        message: 'No se ha podido terminar la conversion multimedia.',
+        context: operation,
+        cause: detail.length > 1200 ? detail.substring(detail.length - 1200) : detail,
+      );
+    } on ProcessException catch (e, st) {
+      throw AppFailure(
+        kind: FailureKind.unsupported,
+        message: Platform.isWindows
+            ? 'Falta FFmpeg. Instalalo con "winget install Gyan.FFmpeg" y '
+                'vuelve a intentarlo.'
+            : 'Falta FFmpeg en este escritorio. Instala el paquete "ffmpeg" '
+                'para crear audio y video.',
+        context: operation,
+        cause: e,
+        stackTrace: st,
+        retryable: false,
+      );
+    }
+  }
+
+  Future<void> _runBundledFfmpeg(
+    List<String> arguments, {
+    required String operation,
+  }) async {
     try {
       final session = await FFmpegKit.executeWithArguments(arguments)
           .timeout(const Duration(minutes: 12));
@@ -375,6 +415,8 @@ class MediaExportService {
         cause: logs.length > 1200 ? logs.substring(logs.length - 1200) : logs,
       );
     } on AppFailure {
+      rethrow;
+    } on MissingPluginException {
       rethrow;
     } catch (e, st) {
       throw AppFailure(

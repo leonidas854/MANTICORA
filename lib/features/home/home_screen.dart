@@ -212,16 +212,27 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         subtitle: 'Prueba con otras palabras. Se busca tambien dentro del texto reconocido.',
       );
     }
+    // En el escritorio lo normal es no tener camara, asi que se ofrece traer
+    // ficheros del disco en vez de mandar a un boton que puede no servir.
+    final escritorio = DeviceLayout.kindOf(context) == AppDeviceKind.desktop;
     return EmptyState(
       icon: Icons.document_scanner_outlined,
       title: 'Aun no hay documentos',
-      subtitle:
-          'Pulsa el boton de la camara para escanear tu primer documento.',
-      action: FilledButton.icon(
-        onPressed: () => startScan(context, ref),
-        icon: const Icon(Icons.camera_alt_outlined),
-        label: const Text('Escanear'),
-      ),
+      subtitle: escritorio
+          ? 'Importa imagenes del ordenador, o usa la camara si tienes una '
+              'conectada.'
+          : 'Pulsa el boton de la camara para escanear tu primer documento.',
+      action: escritorio
+          ? FilledButton.icon(
+              onPressed: () => importImages(context, ref),
+              icon: const Icon(Icons.file_upload_outlined),
+              label: const Text('Importar imagenes'),
+            )
+          : FilledButton.icon(
+              onPressed: () => startScan(context, ref),
+              icon: const Icon(Icons.camera_alt_outlined),
+              label: const Text('Escanear'),
+            ),
     );
   }
 

@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path/path.dart' as p;
 import 'package:printing/printing.dart';
 
 import '../../core/device_profile.dart';
@@ -693,7 +694,7 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
                       style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
                   const SizedBox(height: 4),
                   Text(
-                    '${file.path.split('/').last} · '
+                    '${p.basename(file.path)} · '
                     '${formatBytes(ErrorOrchestrator.guardSync('Midiendo el fichero', file.lengthSync, fallback: 0) ?? 0)}',
                     style: Theme.of(ctx).textTheme.bodySmall,
                   ),
@@ -727,7 +728,7 @@ class _DocumentScreenState extends ConsumerState<DocumentScreen> {
     final saved = await ErrorOrchestrator.guard<String?>(
       'Guardando en el dispositivo',
       () async {
-        final name = file.path.split('/').last;
+        final name = p.basename(file.path);
         return FileSaver.save(name, await file.readAsBytes());
       },
       tag: 'Documento',

@@ -4,11 +4,17 @@ import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:manticora/data/db/app_database.dart';
+import 'package:manticora/data/repositories/document_repository.dart';
 import 'package:manticora/data/repositories/storage_service.dart';
 import 'package:manticora/export/media_export_service.dart';
 import 'package:manticora/features/media/media_source.dart';
+import 'package:manticora/imaging/filters.dart';
+import 'package:manticora/imaging/pipeline.dart';
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
+
+import 'support/corpus.dart';
 
 /// Conversion de verdad: voz real de `espeak-ng` y codificacion real con
 /// FFmpeg, sin simulacros. Si el escritorio no tiene esas dos herramientas la
@@ -38,12 +44,111 @@ void main() {
   setUp(() async {
     temp = await Directory.systemTemp.createTemp('manticora_media_real_');
     PathProviderPlatform.instance = _TempPathProvider(temp.path);
+    await AppDatabase.instance.resetForTesting();
     StorageService.instance.resetForTesting();
   });
 
   tearDown(() async {
+    await AppDatabase.instance.resetForTesting();
     StorageService.instance.resetForTesting();
     if (await temp.exists()) await temp.delete(recursive: true);
+  });
+
+  /// Guarda fotos reales como documento escaneado, con su texto reconocido.
+  Future<String> escanearReal(Map<String, String> fotosYTexto) async {
+    final repo = DocumentRepository.instance;
+    final doc = await repo.createDocument(title: 'Expediente narrado');
+    for (final entrada in fotosYTexto.entries) {
+      final raw = await File('${Corpus.directory}/${entrada.key}').readAsBytes();
+      final normalizada = await ImagePipeline.normalizeWithSize(raw);
+      final procesada = await ImagePipeline.processPage(
+        sourceJpeg: normalizada!.jpeg,
+        quad: await ImagePipeline.detectInJpeg(normalizada.jpeg),
+        filter: ScanFilter.magic,
+        adjustments: Adjustments.none,
+        rotationQuarterTurns: 0,
+      );
+      final page = await repo.addPage(
+        documentId: doc.id,
+        originalJpeg: normalizada.jpeg,
+        processedJpeg: procesada.jpeg,
+        thumbnailJpeg: procesada.thumbnail,
+        width: procesada.width,
+        height: procesada.height,
+      );
+      await repo.setOcrText(page.id, doc.id, entrada.value);
+    }
+    return doc.id;
+  }
+
+  group('Conversion real de un escaneo de la biblioteca', () {
+    test(
+      'una foto real escaneada se convierte en el audio que se manda por WhatsApp',
+      () async {
+        final id = await escanearReal({
+          'instrucciones.jpg': 'Instrucciones de montaje. Primero se colocan '
+              'las patas y despues se aprietan los tornillos.',
+        });
+        final doc = (await DocumentRepository.instance.getDocument(id))!;
+
+        final contenido = await MediaSourceLoader.fromScannedDocument(
+          doc,
+          repository: DocumentRepository.instance,
+          runOcrIfMissing: false,
+        );
+        addTearDown(contenido.dispose);
+        expect(contenido.hasText, isTrue);
+        expect(contenido.hasImages, isTrue);
+
+        final audio = await MediaExportService.instance.toAudio(
+          contenido.pages,
+          title: doc.document.title,
+        );
+
+        expect(_isIsoMedia(await audio.file.readAsBytes()), isTrue);
+        final duracion = await _duration(audio.file.path);
+        expect(duracion, isNotNull);
+        expect(duracion!, greaterThan(2), reason: 'dos frases duran mas de 2 s');
+        expect(await audio.file.length(), lessThan(2 * 1024 * 1024),
+            reason: 'un audio de dos frases tiene que ser diminuto');
+      },
+      timeout: const Timeout(Duration(minutes: 4)),
+      skip: Corpus.isAvailable ? (missing == false ? false : missing) : Corpus.missingReason,
+    );
+
+    test(
+      'varias fotos reales se convierten en un video narrado con sus paginas',
+      () async {
+        final id = await escanearReal({
+          'instrucciones.jpg': 'Primera hoja del manual.',
+          'factura-sichuan.jpg': 'Segunda hoja con el importe.',
+        });
+        final doc = (await DocumentRepository.instance.getDocument(id))!;
+
+        final contenido = await MediaSourceLoader.fromScannedDocument(
+          doc,
+          repository: DocumentRepository.instance,
+          runOcrIfMissing: false,
+        );
+        addTearDown(contenido.dispose);
+
+        final video = await MediaExportService.instance.toVideo(
+          contenido.pages,
+          title: 'manual narrado',
+          options: const MediaExportOptions(videoWidth: 480),
+        );
+
+        expect(_isIsoMedia(await video.file.readAsBytes()), isTrue);
+        final flujos = await _streamKinds(video.file.path);
+        expect(flujos, containsAll(['video', 'audio']));
+
+        final duracion = await _duration(video.file.path);
+        expect(duracion, isNotNull);
+        expect(duracion!, greaterThan(2));
+      },
+      timeout: const Timeout(Duration(minutes: 6)),
+      skip: Corpus.isAvailable ? (missing == false ? false : missing) : Corpus.missingReason,
+    );
   });
 
   group('Conversion real de documentos', () {

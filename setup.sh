@@ -8,6 +8,7 @@
 #         ./setup.sh clean        -> limpia y restaura el proyecto
 #         ./setup.sh test         -> ejecuta las pruebas
 #         ./setup.sh corpus       -> descarga los documentos de prueba
+#         ./setup.sh ocr          -> instala Tesseract en $HOME (OCR de escritorio)
 #         ./setup.sh build        -> compilar los APK (quedan en dist/)
 #         ./setup.sh run          -> ejecutar en el movil o emulador Android
 #         ./setup.sh run linux    -> ejecutar en el escritorio (sin camara)
@@ -336,6 +337,63 @@ phase_corpus() {
   info "Las pruebas que los usan se saltan solas si faltan."
 }
 
+# Motor de OCR para el escritorio. ML Kit solo existe en el movil, asi que en
+# Linux se usa Tesseract; se instala en $HOME (sin root) igual que Flutter.
+phase_ocr() {
+  step "Instalando el motor de texto del escritorio (Tesseract)"
+
+  if command -v tesseract >/dev/null 2>&1; then
+    ok "Tesseract del sistema: $(tesseract --version 2>&1 | head -1)"
+    return 0
+  fi
+
+  local prefix="$HOME/.local/manticora-ocr"
+  if [ -x "$prefix/usr/bin/tesseract" ]; then
+    ok "Ya estaba instalado en $prefix"
+  else
+    command -v curl >/dev/null 2>&1 || { err "Hace falta curl"; return 1; }
+    command -v zstd >/dev/null 2>&1 || command -v bsdtar >/dev/null 2>&1 || \
+      { err "Hace falta zstd para descomprimir los paquetes"; return 1; }
+
+    local mirror="https://fastly.mirror.pkgbuild.com/extra/os/x86_64"
+    local tmp; tmp="$(mktemp -d)"
+    mkdir -p "$prefix"
+
+    info "Buscando los paquetes en el repositorio de Arch..."
+    local indice; indice="$(curl -sL --max-time 60 "$mirror/")" || {
+      err "No se pudo consultar $mirror"; rm -rf "$tmp"; return 1; }
+
+    local nombre paquete
+    for paquete in "tesseract-[0-9][^\"]*x86_64" "leptonica-[0-9][^\"]*x86_64" \
+                   "tesseract-data-spa-[^\"]*any" "tesseract-data-eng-[^\"]*any"; do
+      nombre="$(printf '%s' "$indice" | grep -oE "${paquete}\.pkg\.tar\.zst" | sort -u | tail -1)"
+      [ -n "$nombre" ] || { warn "No se encontro un paquete ($paquete)"; continue; }
+      info "Descargando $nombre"
+      curl -sL --max-time 300 -o "$tmp/paquete.zst" "$mirror/$nombre" || {
+        warn "Fallo la descarga de $nombre"; continue; }
+      tar -I zstd -xf "$tmp/paquete.zst" -C "$prefix" 2>/dev/null || \
+        bsdtar -xf "$tmp/paquete.zst" -C "$prefix" || warn "No se pudo extraer $nombre"
+    done
+    rm -rf "$tmp"
+
+    [ -x "$prefix/usr/bin/tesseract" ] || { err "La instalacion no dejo el binario"; return 1; }
+    ok "Instalado en $prefix"
+  fi
+
+  # El bloque del entorno ya lo escribe phase_toolchain; aqui solo se avisa.
+  cat <<EOF
+
+  Anade esto a tu ~/.zshenv (o ~/.bashrc) para que la app y las pruebas lo vean:
+
+    export PATH="$prefix/usr/bin:\$PATH"
+    export LD_LIBRARY_PATH="$prefix/usr/lib:\${LD_LIBRARY_PATH:-}"
+    export TESSDATA_PREFIX="$prefix/usr/share/tessdata"
+
+  Para quitarlo: rm -rf $prefix
+
+EOF
+}
+
 phase_install() {
   step "Instalando en el dispositivo"
   local device; device="$(android_device)"
@@ -365,10 +423,11 @@ case "${1:-all}" in
   emulator|emu) phase_emu ;;
   install)   phase_install ;;
   corpus)    phase_corpus ;;
+  ocr)       phase_ocr ;;
   apk)       phase_build ;;
   all)       phase_toolchain; phase_project; phase_doctor ;;
   test)      step "Pruebas"; cd "$PROJECT_DIR" && flutter test ;;
-  *) die "Fase desconocida: $1 (usa: toolchain|project|doctor|clean|test|build|run|install|corpus|emulator)" ;;
+  *) die "Fase desconocida: $1 (usa: toolchain|project|doctor|clean|test|build|run|install|corpus|ocr|emulator)" ;;
 esac
 
 printf "\n%s  Listo. Abre una terminal NUEVA (o: source ~/.zshenv) para tener flutter en el PATH.%s\n" "$C_G" "$C_0"

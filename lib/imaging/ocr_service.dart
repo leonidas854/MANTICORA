@@ -5,6 +5,7 @@ import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart
 
 import '../core/failure.dart';
 import '../core/logger.dart';
+import 'desktop_ocr.dart';
 
 /// Una linea reconocida con su caja, en pixeles de la imagen de origen.
 class OcrLine {
@@ -55,7 +56,12 @@ class OcrResult {
   }
 }
 
-/// Reconocimiento de texto sin conexion (ML Kit, modelo empaquetado).
+/// Reconocimiento de texto sin conexion.
+///
+/// En movil se usa ML Kit con el modelo empaquetado en la instalacion; en
+/// escritorio, Tesseract si esta instalado (ver [DesktopOcr]). El resultado
+/// tiene la misma forma en ambos casos, de modo que el PDF buscable, la
+/// busqueda y la narracion funcionan igual en las tres plataformas.
 class OcrService {
   OcrService._();
   static final OcrService instance = OcrService._();
@@ -82,6 +88,10 @@ class OcrService {
     final file = File(path);
     if (!await file.exists()) {
       throw const AppFailure.notFound('La imagen de la pagina ya no esta.');
+    }
+
+    if (!Platform.isAndroid && !Platform.isIOS) {
+      return DesktopOcr.recognizeFile(path);
     }
 
     try {

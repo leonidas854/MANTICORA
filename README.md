@@ -1,9 +1,25 @@
 # Manticora
 
-Escáner de documentos para Android hecho con Flutter. Cubre el flujo completo
-de CamScanner —capturar, enderezar, realzar, reconocer texto y exportar— pero
-**todo el procesamiento ocurre en el dispositivo**: no hay servidor, ni cuenta,
-ni conexión necesaria.
+Escáner de documentos para **Android, Linux y Windows**, hecho con Flutter.
+Cubre el flujo completo de CamScanner —capturar, enderezar, realzar, reconocer
+texto y exportar— más la conversión a audio y vídeo, pero **todo el
+procesamiento ocurre en el dispositivo**: no hay servidor, ni cuenta, ni
+conexión necesaria.
+
+| | Android | Linux | Windows |
+|---|---|---|---|
+| Escanear con cámara | sí | no (no hay plugin) | sí (`camera_windows`) |
+| Importar imágenes y PDF/Word/PowerPoint | sí | sí | sí |
+| Reconocer texto (OCR) | ML Kit incluido | Tesseract del sistema | Tesseract del sistema |
+| PDF, Word, texto, imágenes | sí | sí | sí |
+| Herramientas PDF | sí | sí | sí |
+| Audio y vídeo | FFmpegKit incluido | `ffmpeg` del sistema | FFmpegKit incluido |
+| Voz para narrar | motor TTS del teléfono | `espeak-ng` | `System.Speech` (ya viene) |
+| Compartir | panel del sistema | guardar / ZIP | panel del sistema (Win10 1809+) |
+| Bloqueo con huella o PIN | sí | no | Windows Hello |
+
+Lo que un sistema no puede hacer se dice con un mensaje que explica qué falta y
+cómo instalarlo; nunca falla en silencio.
 
 ---
 
@@ -26,6 +42,8 @@ Fases sueltas, si prefieres ir paso a paso:
 | `./setup.sh doctor` | `flutter doctor -v` |
 | `./setup.sh clean` | Limpia el proyecto y restaura el enlace de `build/` |
 | `./setup.sh test` | Ejecuta las pruebas |
+| `./setup.sh corpus` | Descarga las fotos de documentos reales para las pruebas |
+| `./setup.sh ocr` | Instala Tesseract en `$HOME` (OCR de escritorio, sin root) |
 | `./setup.sh build` | Compila los APK y los deja en `dist/` |
 | `./setup.sh run` | Ejecuta en el móvil o, si no hay ninguno, arranca el emulador |
 | `./setup.sh run linux` | Ejecuta en el escritorio (para iterar rápido en la interfaz) |
@@ -49,6 +67,26 @@ el `PATH`.
   de Kotlin y la vigilancia del sistema de ficheros de Gradle: sobre FUSE ambas
   fallan con errores del tipo *"Failed to create MD5 hash"* o *"input file was
   expected to be present"* sobre ficheros que sí existen.
+
+### Compilar para Windows
+
+`setup.sh` prepara el equipo de desarrollo Linux; el proyecto de Windows
+(`windows/`) ya está en el repositorio y se compila **desde una máquina
+Windows** con Visual Studio 2022 (carga de trabajo *Desktop development with
+C++*) y el SDK de Flutter:
+
+```powershell
+flutter pub get
+flutter build windows --release   # build\windows\x64\runner\Release\
+```
+
+Dos detalles de esa compilación:
+
+- El plugin de FFmpeg **descarga sus binarios la primera vez**, así que ese
+  primer `build` necesita conexión. Para compilar sin red, apunta
+  `FFMPEGKIT_LOCAL_DIR` a un paquete ya descargado.
+- Para reconocer texto hay que instalar Tesseract aparte
+  (`github.com/UB-Mannheim/tesseract`); sin él todo lo demás funciona igual.
 
 ### Instalar en el móvil
 
@@ -88,17 +126,47 @@ Dos detalles propios del escritorio:
 ### Estado verificado
 
 ```
-flutter analyze   ->  No issues found
-flutter test      ->  267 pruebas, todas pasan
-flutter doctor    ->  No issues found
-APK release       ->  arm64 37 MB · arm32 32 MB · universal 101 MB
-Arranque en Linux ->  sin errores en el registro
+flutter analyze     ->  No issues found
+flutter test        ->  325 pruebas, todas pasan (con Tesseract instalado)
+flutter doctor      ->  No issues found
+APK release         ->  arm64 55 MB · arm32 63 MB · x86_64 59 MB (por ABI)
+Compilación Linux   ->  compila y arranca sin errores en el registro
+Compilación Windows ->  requiere una máquina Windows (ver más arriba)
 ```
 
-Entre esas pruebas hay tres conversiones **reales** de extremo a extremo (Word a
-M4A y PowerPoint a MP4, con voz de `espeak-ng` y codificación de FFmpeg, luego
-comprobadas con `ffprobe`). Si el equipo no tiene esas herramientas, esas tres
-se saltan diciendo cuál falta.
+Qué cubren esas pruebas, además de las unitarias de siempre:
+
+- **Fotos reales** (`test/corpus/`): la cadena completa —normalizar, detectar
+  bordes, enderezar, filtrar, guardar— y de ahí a PDF, Word, texto e imágenes,
+  comprobando que el texto sobreviva y que la búsqueda encuentre el documento.
+- **Texto real en español**: tildes, eñes, comillas tipográficas y el símbolo
+  del euro, verificando que se pueden volver a leer del PDF.
+- **Ida y vuelta**: el Word y el PDF que genera la app se vuelven a abrir con su
+  propio lector de importación.
+- **Herramientas PDF sobre un escaneo real**: unir, extraer, girar, dividir,
+  proteger y desproteger.
+- **Conversiones reales** con voz de `espeak-ng` y codificación de FFmpeg,
+  verificadas después con `ffprobe` (que el MP4 lleve pista de audio cuando se
+  pide narración, y que dure lo pedido cuando no).
+- **Las tres plataformas**: reparto de la interfaz, entrega de ficheros
+  (panel, guardar o ZIP), guion de voz de Windows y lectura del OCR de
+  escritorio.
+- **Pantallas montadas de verdad**: biblioteca vacía y con documentos, búsqueda,
+  menú y pantalla de conversión.
+
+Hay una prueba que encadena todo sin inventar nada: foto real → OCR real de
+Tesseract → PDF buscable → se vuelve a extraer el texto y se exige que más del
+80 % de las palabras largas reconocidas sigan ahí, y que la búsqueda de la
+biblioteca encuentre el documento.
+
+Lo que necesita el equipo se salta con un motivo visible en lugar de fingir que
+pasó: sin `ffmpeg`/`espeak-ng` no se prueban las conversiones, sin Tesseract
+(`./setup.sh ocr`) no se prueba el OCR de escritorio, y sin `test/corpus/`
+(`./setup.sh corpus`) no se prueban las fotos reales.
+
+El APK creció ~18 MB respecto a antes de llevar FFmpeg dentro; por eso conviene
+repartir por ABI (`./setup.sh build`, que ya usa `--split-per-abi`) en lugar del
+universal, que junta las tres arquitecturas y pasa de 120 MB.
 
 El release va minificado con R8 (`isMinifyEnabled`, `isShrinkResources`) y
 reglas propias en `android/app/proguard-rules.pro`. Está firmado con la clave de
@@ -123,7 +191,13 @@ generar un keystore propio**.
 - Reedición no destructiva: siempre se reprocesa desde el original.
 
 **Reconocer texto (OCR)**
-- ML Kit sin conexión, con el modelo empaquetado en la instalación.
+- En el móvil, ML Kit sin conexión con el modelo empaquetado en la instalación.
+- En Linux y Windows, Tesseract. En Linux se instala **sin root** con
+  `./setup.sh ocr` (queda en `~/.local/manticora-ocr`); también vale el del
+  sistema (`sudo pacman -S tesseract tesseract-data-spa tesseract-data-eng` o
+  `apt install tesseract-ocr-spa`). En Windows, el instalador de UB Mannheim.
+  Se leen también las cajas de cada palabra, así que el PDF buscable sale igual
+  de bien que en el móvil.
 - Búsqueda de texto completo con FTS5 sobre títulos y texto reconocido.
 
 **Exportar**

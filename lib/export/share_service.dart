@@ -43,8 +43,33 @@ class FileDeliveryResult {
 /// `share_plus` no admite adjuntos en Linux. Alli un fichero se guarda con el
 /// selector del sistema y varios se empaquetan primero en ZIP, de modo que
 /// nunca se pierda silenciosamente parte de la seleccion.
+///
+/// Windows si tiene panel nativo, pero solo desde Windows 10 1809; en versiones
+/// anteriores `share_plus` lanza [UnimplementedError] y aqui se cae con
+/// naturalidad al mismo guardado que en Linux en lugar de dar un error.
 abstract final class ShareService {
   static const String _tag = 'Compartir';
+
+  /// Como se guarda un fichero cuando no hay panel de compartir.
+  ///
+  /// Es un punto de sustitucion para las pruebas: asi se puede comprobar el
+  /// camino de Linux y el de un Windows antiguo sin abrir un dialogo real.
+  @visibleForTesting
+  static Future<String?> Function(String fileName, Uint8List bytes) saveFile =
+      FileSaver.save;
+
+  /// Como se abre el panel del sistema. Igual que [saveFile], es un punto de
+  /// sustitucion para poder comprobar en pruebas lo que recibe cada plataforma.
+  @visibleForTesting
+  static Future<ShareResult> Function(ShareParams params) shareWithSystem =
+      (params) => SharePlus.instance.share(params);
+
+  /// Devuelve compartir y guardar a su comportamiento normal.
+  @visibleForTesting
+  static void resetSaverForTesting() {
+    saveFile = FileSaver.save;
+    shareWithSystem = (params) => SharePlus.instance.share(params);
+  }
 
   static FileDeliveryStrategy strategyFor(
     TargetPlatform platform, {
@@ -89,19 +114,29 @@ abstract final class ShareService {
 
     try {
       await _validateFiles(files);
-      return await switch (strategy) {
-        FileDeliveryStrategy.platformShare => _share(
-          files,
-          subject: subject,
-          text: text,
-          sharePositionOrigin: sharePositionOrigin,
-        ),
-        FileDeliveryStrategy.saveAs => _saveOne(files.single),
-        FileDeliveryStrategy.bundleAndSave => _bundleAndSave(
-          files,
-          bundleName: bundleName,
-        ),
-      };
+      try {
+        return await switch (strategy) {
+          FileDeliveryStrategy.platformShare => _share(
+            files,
+            subject: subject,
+            text: text,
+            sharePositionOrigin: sharePositionOrigin,
+          ),
+          FileDeliveryStrategy.saveAs => _saveOne(files.single),
+          FileDeliveryStrategy.bundleAndSave => _bundleAndSave(
+            files,
+            bundleName: bundleName,
+          ),
+        };
+      } on UnimplementedError catch (e) {
+        if (strategy != FileDeliveryStrategy.platformShare) rethrow;
+        // Sistema sin panel para adjuntos: se guarda, que es lo unico que
+        // queda, en vez de dejar a la persona sin su fichero.
+        Log.w(_tag, 'Sin panel de compartir con adjuntos; se guarda el archivo', e);
+        return files.length == 1
+            ? await _saveOne(files.single)
+            : await _bundleAndSave(files, bundleName: bundleName);
+      }
     } on AppFailure {
       rethrow;
     } on UnimplementedError catch (e, st) {
@@ -126,7 +161,7 @@ abstract final class ShareService {
     String? text,
     Rect? sharePositionOrigin,
   }) async {
-    final result = await SharePlus.instance.share(
+    final result = await shareWithSystem(
       ShareParams(
         files: files,
         subject: subject,
@@ -155,7 +190,7 @@ abstract final class ShareService {
   static Future<FileDeliveryResult> _saveOne(XFile file) async {
     final bytes = await _readNonEmpty(file);
     final name = _safeEntryName(file, fallback: 'archivo-manticora');
-    final saved = await FileSaver.save(name, bytes);
+    final saved = await saveFile(name, bytes);
     return FileDeliveryResult(
       strategy: FileDeliveryStrategy.saveAs,
       savedLocation: saved,
@@ -185,7 +220,7 @@ abstract final class ShareService {
     }
     final bytes = Uint8List.fromList(encoded);
     final name = _safeZipName(bundleName);
-    final saved = await FileSaver.save(name, bytes);
+    final saved = await saveFile(name, bytes);
     Log.i(_tag, 'Empaquetados ${files.length} archivos en $name');
     return FileDeliveryResult(
       strategy: FileDeliveryStrategy.bundleAndSave,

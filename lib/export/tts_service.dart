@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import '../core/failure.dart';
@@ -9,8 +10,10 @@ import 'media_export.dart';
 
 /// Sintesis de voz enteramente local.
 ///
-/// Android usa el motor TTS instalado en el telefono mediante un canal nativo;
-/// Linux usa `espeak-ng` (o `espeak`) sin pasar el documento por un servidor.
+/// Cada plataforma usa lo que ya trae instalado, sin enviar el documento a
+/// ningun servidor: Android el motor TTS del telefono a traves de un canal
+/// nativo, Windows `System.Speech` (parte del propio sistema, via PowerShell) y
+/// Linux `espeak-ng` (o `espeak`).
 class TtsService {
   TtsService._();
 
@@ -41,6 +44,13 @@ class TtsService {
 
       if (Platform.isAndroid) {
         await _synthesizeAndroid(
+          chunks[i],
+          file,
+          language: language,
+          rate: rate,
+        );
+      } else if (Platform.isWindows) {
+        await _synthesizeWindows(
           chunks[i],
           file,
           language: language,
@@ -98,6 +108,119 @@ class TtsService {
         stackTrace: st,
       );
     }
+  }
+
+  /// Windows trae `System.Speech` desde Windows 7: no hay nada que instalar.
+  ///
+  /// El texto y el guion viajan en ficheros temporales en vez de en la linea de
+  /// ordenes: asi ni las comillas, ni los acentos, ni un `$` sueltos pueden
+  /// romper la llamada o ejecutar algo que no toca.
+  static Future<void> _synthesizeWindows(
+    String text,
+    File file, {
+    required String language,
+    required double rate,
+  }) async {
+    final work = file.parent;
+    final stem = file.uri.pathSegments.last;
+    final textFile = File('${work.path}${Platform.pathSeparator}$stem.txt');
+    final scriptFile = File('${work.path}${Platform.pathSeparator}$stem.ps1');
+
+    try {
+      await textFile.writeAsString(text, flush: true);
+      await scriptFile.writeAsString(
+        windowsSpeechScript(
+          textPath: textFile.path,
+          wavPath: file.path,
+          language: language,
+          rate: rate,
+        ),
+        flush: true,
+      );
+
+      Object? lastError;
+      for (final shell in const ['powershell', 'pwsh']) {
+        try {
+          final result = await Process.run(shell, [
+            '-NoProfile',
+            '-NonInteractive',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-File',
+            scriptFile.path,
+          ]).timeout(const Duration(seconds: 120));
+          if (result.exitCode == 0) return;
+          lastError = '${result.stderr}'.trim();
+        } on ProcessException catch (e) {
+          lastError = e;
+        }
+      }
+
+      Log.w('Audio', 'System.Speech no genero el audio: $lastError');
+      throw const AppFailure(
+        kind: FailureKind.document,
+        message: 'El motor de voz de Windows no ha podido leer este texto. '
+            'Comprueba que haya una voz instalada en Configuracion > Hora e '
+            'idioma > Voz.',
+      );
+    } on AppFailure {
+      rethrow;
+    } catch (e, st) {
+      throw AppFailure(
+        kind: FailureKind.document,
+        message: 'No se ha podido ejecutar el motor de voz de Windows.',
+        cause: e,
+        stackTrace: st,
+      );
+    } finally {
+      for (final temp in [textFile, scriptFile]) {
+        try {
+          if (await temp.exists()) await temp.delete();
+        } catch (_) {
+          // Un temporal que no se deja borrar no invalida el audio.
+        }
+      }
+    }
+  }
+
+  /// Guion de PowerShell que sintetiza a WAV.
+  ///
+  /// Las rutas van entre comillas simples con las comillas internas duplicadas,
+  /// que es como PowerShell escapa una cadena literal: un fichero llamado
+  /// `it's.wav` no puede cerrar la cadena ni colar una orden detras.
+  @visibleForTesting
+  static String windowsSpeechScript({
+    required String textPath,
+    required String wavPath,
+    required String language,
+    required double rate,
+  }) {
+    // System.Speech mide la velocidad de -10 a 10, con 0 como ritmo normal.
+    final speed = (((rate.clamp(0.5, 1.6) - 1) * 10).round()).clamp(-10, 10);
+    String quote(String value) => "'${value.replaceAll("'", "''")}'";
+    return '''
+\$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Speech
+\$texto = [System.IO.File]::ReadAllText(${quote(textPath)}, [System.Text.Encoding]::UTF8)
+\$voz = New-Object System.Speech.Synthesis.SpeechSynthesizer
+try {
+  try {
+    \$cultura = New-Object System.Globalization.CultureInfo(${quote(language)})
+    \$voz.SelectVoiceByHints(
+      [System.Speech.Synthesis.VoiceGender]::NotSet,
+      [System.Speech.Synthesis.VoiceAge]::NotSet,
+      0,
+      \$cultura)
+  } catch {
+    # Sin voz para ese idioma se usa la predeterminada del sistema.
+  }
+  \$voz.Rate = $speed
+  \$voz.SetOutputToWaveFile(${quote(wavPath)})
+  \$voz.Speak(\$texto)
+} finally {
+  \$voz.Dispose()
+}
+''';
   }
 
   static Future<void> _synthesizeLinux(
